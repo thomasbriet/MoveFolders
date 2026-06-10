@@ -1,0 +1,59 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.4"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            VERSION="${REQUESTED_VERSION#v}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build app, zip and installer
+        run: |
+          chmod +x scripts/build_release.sh
+          ./scripts/build_release.sh "${{ steps.version.outputs.version }}"
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          PKG="MoveFolders_v${VERSION}_installer.pkg"
+          ZIP="MoveFolders_v${VERSION}_share.zip"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$PKG" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$PKG" "$ZIP" \
+              --title "MoveFolders v${VERSION}" \
+              --notes "Automatische build voor MoveFolders v${VERSION}."
+          fi

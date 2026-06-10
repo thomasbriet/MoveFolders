@@ -27,10 +27,21 @@ let updateGitHubRepo = "MoveFolders"
 
 Publiceer nieuwe installers als GitHub Release assets, bijvoorbeeld met tag `v0.4`, `v0.5`, enzovoort.
 
+## Automatische release
+
+GitHub Actions bouwt en uploadt release-assets automatisch:
+
+- Push een tag zoals `v0.5`, of
+- Start in GitHub `Actions` -> `Build release` -> `Run workflow` en vul bijvoorbeeld `0.4` in.
+
+De workflow maakt of update de GitHub Release en uploadt:
+
+- `MoveFolders_v<versie>_installer.pkg`
+- `MoveFolders_v<versie>_share.zip`
+
 ## Release checklist
 
 1. Werk versie aan met `./scripts/build_release.sh <versie>`.
 2. Commit bronwijzigingen.
 3. Push naar GitHub.
-4. Maak een GitHub Release met tag `v<versie>`.
-5. Upload `MoveFolders_v<versie>_installer.pkg` als release asset.
+4. Tag en push de release, bijvoorbeeld `git tag -a v0.5 -m "MoveFolders v0.5"` en `git push --tags`.
