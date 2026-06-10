@@ -354,7 +354,7 @@ class MismatchWindowController: NSObject, NSWindowDelegate {
 class Controller: NSObject {
     let defaultServer = "/Volumes/Archief/Artikelen-werkbestanden"
     let defaultLocal = "/Volumes/999 Games/01_Games"
-    let updateGitHubOwner = "TODO_GITHUB_OWNER"
+    let updateGitHubOwner = "thomasbriet"
     let updateGitHubRepo = "MoveFolders"
     struct RSyncConfig {
         let path: String

@@ -21,7 +21,7 @@ De app heeft een knop `Updates` die de nieuwste GitHub Release kan controleren e
 Voor gebruik moet in `MoveFolders_v0.3.swift` deze constante worden ingesteld:
 
 ```swift
-let updateGitHubOwner = "JOUW_GITHUB_OWNER"
+let updateGitHubOwner = "thomasbriet"
 let updateGitHubRepo = "MoveFolders"
 ```
 
@@ -34,4 +34,3 @@ Publiceer nieuwe installers als GitHub Release assets, bijvoorbeeld met tag `v0.
 3. Push naar GitHub.
 4. Maak een GitHub Release met tag `v<versie>`.
 5. Upload `MoveFolders_v<versie>_installer.pkg` als release asset.
-
