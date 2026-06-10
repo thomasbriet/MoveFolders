@@ -1,0 +1,10 @@
+.DS_Store
+*.app/
+*.bin
+*.pkg
+*.zip
+*.xcarchive
+*.dSYM/
+_oud/
+naamloze map/
+
