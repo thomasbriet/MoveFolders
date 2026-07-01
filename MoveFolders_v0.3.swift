@@ -466,6 +466,7 @@ class Controller: NSObject {
     var dstAdapter = TableAdapter()
     var srcField: NSTextField!
     var dstField: NSTextField!
+    var recentSourcePopup: NSPopUpButton!
     var srcSort: NSPopUpButton!
     var dstSort: NSPopUpButton!
     var preScanCheckbox: NSButton!
@@ -507,8 +508,12 @@ class Controller: NSObject {
     var progressOverallFileTotal: Int?
     var srcHistory: [String] = []
     var dstHistory: [String] = []
+    var recentSourcePaths: [String] = []
     var srcListToken: Int = 0
     var dstListToken: Int = 0
+    let recentSourceDefaults = UserDefaults(suiteName: "com.thomasbriet.MoveFolders") ?? UserDefaults.standard
+    let recentSourceDefaultsKey = "recentSourcePaths"
+    let recentSourceLimit = 5
     let pendingCleanupStateQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.state")
     var pendingCleanupPaths: Set<String> = []
     let transferControlQueue = DispatchQueue(label: "MoveFolders.transferControl")
@@ -645,6 +650,15 @@ class Controller: NSObject {
             content.addSubview(btn)
         }
 
+        func makeRecentSourcePopup(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat) -> NSPopUpButton {
+            let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: w, height: 26), pullsDown: true)
+            pop.target = self
+            pop.action = #selector(selectRecentSource)
+            pop.autoresizingMask = [.maxXMargin, .minYMargin]
+            content.addSubview(pop)
+            return pop
+        }
+
         func makeTable(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> NSTableView {
             let scroll = NSScrollView(frame: NSRect(x: x, y: y, width: w, height: h))
             scroll.hasVerticalScroller = true
@@ -672,6 +686,9 @@ class Controller: NSObject {
         srcField = makeTextField(80, 556, 420, defaultServer)
         dstField = makeTextField(630, 556, 420, defaultLocal)
         dstField.autoresizingMask = [.minXMargin, .width, .minYMargin]
+        recentSourcePaths = loadRecentSourcePaths()
+        recentSourcePopup = makeRecentSourcePopup(380, 575, 180)
+        refreshRecentSourceMenu()
         // Sort dropdowns
         func makeSort(_ x: CGFloat, _ y: CGFloat, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSPopUpButton {
             let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: 150, height: 26), pullsDown: false)
@@ -740,7 +757,7 @@ class Controller: NSObject {
 
     @objc func chooseSrc() {
         if let p = pickFolder(start: srcField.stringValue) {
-            setSrcPath(p)
+            setSrcPath(p, rememberRecent: true)
         }
     }
 
@@ -750,7 +767,7 @@ class Controller: NSObject {
         }
     }
 
-    @objc func applySrc() { setSrcPath(srcField.stringValue) }
+    @objc func applySrc() { setSrcPath(srcField.stringValue, rememberRecent: true) }
     @objc func applyDst() { setDstPath(dstField.stringValue) }
     @objc func goBackSrc() { popHistory(isSource: true) }
     @objc func goBackDst() { popHistory(isSource: false) }
@@ -781,6 +798,12 @@ class Controller: NSObject {
         if !start.isEmpty { panel.directoryURL = URL(fileURLWithPath: start) }
         let resp = panel.runModal()
         return resp == .OK ? panel.url?.path : nil
+    }
+
+    @objc func selectRecentSource(_ sender: NSPopUpButton) {
+        defer { sender.selectItem(at: 0) }
+        guard let path = sender.selectedItem?.representedObject as? String else { return }
+        setSrcPath(path, rememberRecent: true)
     }
 
     func showProgress(_ message: String, detail: String) {
@@ -1035,8 +1058,11 @@ class Controller: NSObject {
         }
     }
 
-    func setSrcPath(_ path: String) {
+    func setSrcPath(_ path: String, rememberRecent: Bool = true) {
         setPath(field: srcField, newPath: path, history: &srcHistory, refresh: refreshSrc)
+        if rememberRecent {
+            rememberRecentSource(srcField.stringValue)
+        }
         schedulePendingDeleteCleanup(basePath: srcField.stringValue)
     }
 
@@ -1275,6 +1301,68 @@ class Controller: NSObject {
         return (done, totalAll)
     }
 
+    func normalizeSourcePath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return (trimmed as NSString).standardizingPath
+    }
+
+    func loadRecentSourcePaths() -> [String] {
+        let stored = recentSourceDefaults.stringArray(forKey: recentSourceDefaultsKey) ?? []
+        var seen = Set<String>()
+        var result: [String] = []
+        for rawPath in stored {
+            let path = normalizeSourcePath(rawPath)
+            guard !path.isEmpty, !seen.contains(path) else { continue }
+            seen.insert(path)
+            result.append(path)
+            if result.count >= recentSourceLimit { break }
+        }
+        return result
+    }
+
+    func recentSourceTitle(for path: String) -> String {
+        let parts = path.split(separator: "/").map(String.init)
+        guard parts.count > 3 else { return path }
+        return ".../" + parts.suffix(3).joined(separator: "/")
+    }
+
+    func refreshRecentSourceMenu() {
+        guard recentSourcePopup != nil else { return }
+        recentSourcePopup.removeAllItems()
+        recentSourcePopup.addItem(withTitle: "Laatste bronnen")
+        recentSourcePopup.item(at: 0)?.isEnabled = false
+
+        if recentSourcePaths.isEmpty {
+            recentSourcePopup.addItem(withTitle: "Geen recente bronnen")
+            recentSourcePopup.lastItem?.isEnabled = false
+            recentSourcePopup.isEnabled = false
+            recentSourcePopup.selectItem(at: 0)
+            return
+        }
+
+        recentSourcePopup.menu?.addItem(NSMenuItem.separator())
+        for path in recentSourcePaths {
+            recentSourcePopup.addItem(withTitle: recentSourceTitle(for: path))
+            recentSourcePopup.lastItem?.representedObject = path
+            recentSourcePopup.lastItem?.toolTip = path
+        }
+        recentSourcePopup.isEnabled = true
+        recentSourcePopup.selectItem(at: 0)
+    }
+
+    func rememberRecentSource(_ path: String) {
+        let normalized = normalizeSourcePath(path)
+        guard !normalized.isEmpty else { return }
+        recentSourcePaths.removeAll { $0 == normalized }
+        recentSourcePaths.insert(normalized, at: 0)
+        if recentSourcePaths.count > recentSourceLimit {
+            recentSourcePaths.removeSubrange(recentSourceLimit..<recentSourcePaths.count)
+        }
+        recentSourceDefaults.set(recentSourcePaths, forKey: recentSourceDefaultsKey)
+        refreshRecentSourceMenu()
+    }
+
     func setPath(field: NSTextField, newPath: String, history: inout [String], refresh: () -> Void) {
         let trimmed = newPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -1450,7 +1538,11 @@ class Controller: NSObject {
         }
     }
 
-    @objc func openSrcItem() { navigateIntoSelection(table: srcTable, basePath: srcField.stringValue, setter: setSrcPath) }
+    @objc func openSrcItem() {
+        navigateIntoSelection(table: srcTable, basePath: srcField.stringValue) { path in
+            self.setSrcPath(path, rememberRecent: false)
+        }
+    }
     @objc func openDstItem() { navigateIntoSelection(table: dstTable, basePath: dstField.stringValue, setter: setDstPath) }
 
     func navigateIntoSelection(table: NSTableView, basePath: String, setter: (String) -> Void) {
@@ -2544,6 +2636,7 @@ class Controller: NSObject {
         }
         let srcPath = srcField.stringValue
         let dstPath = dstField.stringValue
+        rememberRecentSource(srcPath)
         let items = idxs.compactMap { i -> String? in
             guard i >= 0 && i < srcAdapter.items.count else { return nil }
             return srcAdapter.items[i].name

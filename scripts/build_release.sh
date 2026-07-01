@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.4}"
+VERSION="${1:-0.5}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -48,4 +48,3 @@ COPYFILE_DISABLE=1 pkgbuild \
   "${APP_NAME}_installer.pkg"
 
 ls -lh "$APP_DIR" "${APP_NAME}_share.zip" "${APP_NAME}_installer.pkg"
-
