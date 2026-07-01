@@ -470,9 +470,11 @@ class Controller: NSObject {
     var srcSort: NSPopUpButton!
     var dstSort: NSPopUpButton!
     var preScanCheckbox: NSButton!
+    var skipEmptyFoldersCheckbox: NSButton!
     var deleteSourceCheckbox: NSButton!
     var xattrsCheckbox: NSButton!
     var preScanEnabled = false
+    var skipEmptyFoldersEnabled = true
     var deleteSourceEnabled = true
     var copyXattrsEnabled = false
     var xattrsDisabledForJob = false
@@ -703,20 +705,25 @@ class Controller: NSObject {
         preScanCheckbox.frame = NSRect(x: 500, y: 520, width: 260, height: 22)
         preScanCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
         content.addSubview(preScanCheckbox)
+        skipEmptyFoldersCheckbox = NSButton(checkboxWithTitle: "Lege mappen overslaan", target: self, action: #selector(toggleSkipEmptyFolders))
+        skipEmptyFoldersCheckbox.frame = NSRect(x: 500, y: 498, width: 260, height: 22)
+        skipEmptyFoldersCheckbox.state = .on
+        skipEmptyFoldersCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
+        content.addSubview(skipEmptyFoldersCheckbox)
         deleteSourceCheckbox = NSButton(checkboxWithTitle: "Bron verwijderen na overdracht", target: self, action: #selector(toggleDeleteSource))
-        deleteSourceCheckbox.frame = NSRect(x: 500, y: 498, width: 300, height: 22)
+        deleteSourceCheckbox.frame = NSRect(x: 500, y: 476, width: 300, height: 22)
         deleteSourceCheckbox.state = .on
         deleteSourceCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
         content.addSubview(deleteSourceCheckbox)
         xattrsCheckbox = NSButton(checkboxWithTitle: "Bestandsattributen (xattrs) kopiëren", target: self, action: #selector(toggleXattrs))
-        xattrsCheckbox.frame = NSRect(x: 500, y: 476, width: 320, height: 22)
+        xattrsCheckbox.frame = NSRect(x: 500, y: 454, width: 320, height: 22)
         xattrsCheckbox.state = copyXattrsEnabled ? .on : .off
         xattrsCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
         content.addSubview(xattrsCheckbox)
 
-        // Keep clear spacing under the option checkboxes.
-        let tableY: CGFloat = 90
-        let tableHeight: CGFloat = 372
+        // Keep clear spacing under the option checkboxes and path buttons.
+        let tableY: CGFloat = 80
+        let tableHeight: CGFloat = 334
         srcTable = makeTable(20, tableY, 520, tableHeight)
         srcTable.enclosingScrollView?.autoresizingMask = [.width, .height]
         dstTable = makeTable(600, tableY, 520, tableHeight)
@@ -737,10 +744,10 @@ class Controller: NSObject {
         makeImageButton(NSImage.folderName, 510, 554, 28, #selector(chooseSrc))
         makeImageButton(NSImage.refreshTemplateName, 535, 554, 28, #selector(swapPaths))
         makeImageButton(NSImage.folderName, 1060, 554, 28, #selector(chooseDst), mask: [.minXMargin, .minYMargin])
-        makeButton("Gebruik bronpad", 20, 480, 150, 26, #selector(applySrc))
-        makeButton("Terug", 180, 480, 80, 26, #selector(goBackSrc))
-        makeButton("Gebruik doelpad", 700, 480, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
-        makeButton("Terug", 860, 480, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
+        makeButton("Gebruik bronpad", 20, 424, 150, 26, #selector(applySrc))
+        makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
+        makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
+        makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
 
         refreshSrc()
         refreshDst()
@@ -772,6 +779,7 @@ class Controller: NSObject {
     @objc func goBackSrc() { popHistory(isSource: true) }
     @objc func goBackDst() { popHistory(isSource: false) }
     @objc func togglePreScan(_ sender: NSButton) { preScanEnabled = sender.state == .on }
+    @objc func toggleSkipEmptyFolders(_ sender: NSButton) { skipEmptyFoldersEnabled = sender.state == .on }
     @objc func toggleDeleteSource(_ sender: NSButton) { deleteSourceEnabled = sender.state == .on }
     @objc func toggleXattrs(_ sender: NSButton) { copyXattrsEnabled = sender.state == .on }
     @objc func cancelTransfer() {
@@ -1796,6 +1804,37 @@ class Controller: NSObject {
         return count
     }
 
+    func sourceItemIsDirectory(_ name: String, base: String) -> Bool {
+        let full = (base as NSString).appendingPathComponent(name)
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: full, isDirectory: &isDir) && isDir.boolValue
+    }
+
+    func sourceFolderContainsAnyFile(_ name: String, base: String) -> Bool {
+        let fm = FileManager.default
+        let full = (base as NSString).appendingPathComponent(name)
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue else {
+            return true
+        }
+        guard let en = fm.enumerator(atPath: full) else {
+            log("Lege-map controle kon niet lezen, kopie wordt niet overgeslagen: \(name)")
+            return true
+        }
+        for case let rel as String in en {
+            if isTransferCancelRequested() {
+                return true
+            }
+            if rel == ".DS_Store" || rel.hasSuffix("/.DS_Store") { continue }
+            let p = (full as NSString).appendingPathComponent(rel)
+            var childIsDir: ObjCBool = false
+            if fm.fileExists(atPath: p, isDirectory: &childIsDir), !childIsDir.boolValue {
+                return true
+            }
+        }
+        return false
+    }
+
     func timestampsEqual(items: [String], srcBase: String, dstBase: String) -> (allEqual: Bool, firstMismatch: String?) {
         let fm = FileManager.default
         for nm in items {
@@ -2645,10 +2684,11 @@ class Controller: NSObject {
         resetXattrRuntimeChoices()
         let summary = items.prefix(3).joined(separator: ", ") + (items.count > 3 ? " … (+\(items.count - 3) meer)" : "")
         log("Start copy: \(items.joined(separator: ", "))")
+        log("Instelling lege mappen overslaan: \(skipEmptyFoldersEnabled ? "aan" : "uit")")
         log("Instelling xattrs: \(copyXattrsEnabled ? "aan" : "uit")")
         DispatchQueue.main.async {
             self.showProgress("Bezig met overdracht...", detail: summary)
-            self.setPhase("Controle doel")
+            self.setPhase("Controle bron")
             self.progressTaskOrder = items
             self.progressTaskFileTotals = [:]
             self.progressOverallFileTotal = nil
@@ -2657,9 +2697,9 @@ class Controller: NSObject {
         DispatchQueue.global(qos: .userInitiated).async {
             var summaries: [TransferSummary] = []
             var didCancel = false
+            var preScannedFileCounts: [String: Int] = [:]
             if self.preScanEnabled {
                 var totalAll = 0
-                var perMap: [String: Int] = [:]
                 for (idx, name) in items.enumerated() {
                     if self.isTransferCancelRequested() {
                         didCancel = true
@@ -2675,14 +2715,14 @@ class Controller: NSObject {
                         didCancel = true
                         break
                     }
-                    perMap[name] = total
+                    preScannedFileCounts[name] = total
                     totalAll += total
                     DispatchQueue.main.async {
                         self.progressDetail?.stringValue = "Bestanden totaal: \(total) (map) | Totaal: \(totalAll)"
                     }
                 }
                 DispatchQueue.main.async {
-                    self.progressTaskFileTotals = perMap
+                    self.progressTaskFileTotals = preScannedFileCounts
                     self.progressOverallFileTotal = totalAll
                 }
             }
@@ -2691,7 +2731,35 @@ class Controller: NSObject {
                     didCancel = true
                     break
                 }
-                // Snelle doelcheck (geen volledige pre-scan)
+                // Controleer lege bronmappen voordat de doelmap wordt beoordeeld.
+                DispatchQueue.main.async { self.setPhase("Controle bron \(idx + 1)/\(items.count): \(name)") }
+                if self.skipEmptyFoldersEnabled && self.sourceItemIsDirectory(name, base: srcPath) {
+                    let hasFiles: Bool
+                    if let preScannedCount = preScannedFileCounts[name] {
+                        hasFiles = preScannedCount > 0
+                    } else {
+                        DispatchQueue.main.async {
+                            self.setPhase("Controle lege map \(idx + 1)/\(items.count): \(name)")
+                            self.progressDetail?.stringValue = "Lege map controleren: \(name)"
+                        }
+                        hasFiles = self.sourceFolderContainsAnyFile(name, base: srcPath)
+                    }
+                    if self.isTransferCancelRequested() {
+                        didCancel = true
+                        break
+                    }
+                    if !hasFiles {
+                        self.log("Lege map overgeslagen: \(name)")
+                        summaries.append(TransferSummary(name: name, status: .warning("Overgeslagen: lege map")))
+                        DispatchQueue.main.async {
+                            self.progressDetail?.stringValue = "Overgeslagen: lege map \(name)"
+                            self.refreshSrc()
+                            self.refreshDst()
+                        }
+                        continue
+                    }
+                }
+
                 DispatchQueue.main.async { self.setPhase("Controle doel \(idx + 1)/\(items.count): \(name)") }
                 let dstItem = (dstPath as NSString).appendingPathComponent(name)
                 let dstStatus = self.destinationStatus(path: dstItem)
@@ -2714,7 +2782,7 @@ class Controller: NSObject {
                 }
 
                 if self.preScanEnabled {
-                    let total = self.progressTaskFileTotals[name] ?? 0
+                    let total = preScannedFileCounts[name] ?? 0
                     self.log("Pre-scan count \(name): \(total) bestanden")
                     DispatchQueue.main.async {
                         if let overall = self.progressOverallFileTotal {
@@ -2722,12 +2790,6 @@ class Controller: NSObject {
                         } else {
                             self.progressDetail?.stringValue = "Bestanden totaal: \(total)"
                         }
-                    }
-                    if total == 0 {
-                        DispatchQueue.main.async {
-                            self.alert("Geen bestanden gevonden in \(name).")
-                        }
-                        continue
                     }
                 }
 

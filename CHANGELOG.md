@@ -2,6 +2,21 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.6.1] - 2026-07-01
+
+### Toegevoegd
+
+- Optie `Lege mappen overslaan` in het hoofdscherm.
+- De optie staat standaard aan.
+- Geselecteerde bronmappen zonder bestanden worden vóór de doelcontrole en vóór rsync automatisch overgeslagen.
+- Overgeslagen lege mappen verschijnen als waarschuwing in de overdrachtssamenvatting.
+
+### Gewijzigd
+
+- Pre-scan tellingen worden hergebruikt voor de lege-mapcontrole wanneer pre-scan aan staat.
+- De hoofdschermindeling is aangepast zodat de opties en padknoppen niet overlappen.
+- Standaard buildversie in `scripts/build_release.sh` verhoogd naar `0.6.1`.
+
 ## [0.6] - 2026-07-01
 
 ### Toegevoegd
