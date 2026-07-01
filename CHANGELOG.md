@@ -1,0 +1,77 @@
+# Changelog
+
+Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
+
+## [0.5] - 2026-07-01
+
+### Toegevoegd
+
+- Dropdown `Laatste bronnen` in het hoofdscherm.
+- Opslag van maximaal 5 laatst gebruikte bronpaden via `UserDefaults`.
+- Recente bronnen worden bijgewerkt bij map kiezen, `Gebruik bronpad` en het starten van een overdracht.
+- Submapnavigatie via dubbelklik vult de recente-bronnenlijst niet onnodig.
+- GitHub Actions release-workflow bouwt automatisch de `.app`, `.zip` en `.pkg` bij nieuwe tags.
+- Release-workflow kan ook handmatig vanuit GitHub Actions worden gestart.
+
+### Gewijzigd
+
+- Standaard buildversie in `scripts/build_release.sh` verhoogd naar `0.5`.
+- GitHub Actions workflow expliciet op Node.js 24 gezet.
+
+## [0.4] - 2026-06-10
+
+### Toegevoegd
+
+- GitHub-koppeling voor `thomasbriet/MoveFolders`.
+- Knop `Updates` in de app voor controle op de nieuwste GitHub Release.
+- Buildscript voor lokale release-builds met `.app`, deelbare `.zip` en `.pkg` installer.
+- Versie `0.4` installer en deelpakket.
+- Optie `Bron verwijderen na overdracht`.
+- Knop `Annuleer overdracht` in het statusscherm.
+- Statusscherm met huidig bestand, doelpad en overdrachtsvoortgang.
+- Post-verify statusregels met scanrichting, aantallen en geschatte voortgang.
+- Busy/indeterminate indicator tijdens post-verify.
+- Mismatch-venster met selectieknoppen: `Alles`, `Niets`, `Inverteer` en `Alleen bron nieuwer`.
+- Optie voor het kopiëren van bestandsattributen/xattrs.
+- Prompt bij xattr-permissiefouten om xattrs voor de map of opdracht uit te schakelen.
+- Debuglogging voor rsync-commando's, rsync-status en verwijderfouten.
+- Pending-delete cleanup voor bronmappen die tijdelijk `Resource busy` zijn.
+
+### Gewijzigd
+
+- Netwerkschijven laden sneller door eerst een snelle lijst zonder metadata te tonen.
+- Metadata wordt alleen opgehaald wanneer dat nodig is, bijvoorbeeld bij sorteren op datum.
+- Rsync-timeout kijkt naar inactiviteit in plaats van totale looptijd.
+- Rsync-pad en flags worden dynamisch gekozen op basis van beschikbare rsync-versie.
+- Xattrs staan standaard uit om `com.apple.provenance` permissiefouten te vermijden.
+- Timestamps worden na kopie en mismatch-overwrite expliciet hersteld met FileManager en `touch -mt`.
+- Post-verify corrigeert tijdverschillen wanneer grootte gelijk is.
+- Extra bestanden op de doellocatie worden standaard genegeerd in plaats van als fout gemeld.
+- Statusscherm toont alleen het relevante doelpad en niet opnieuw de volledige bron/doel-prefix.
+- Lange bestands- en padnamen staan onder elkaar, zodat ze elkaar niet overlappen.
+- Interne rsync-markers voor huidig bestand worden verborgen in de gewone statusweergave.
+- Code 23 van rsync wordt specifieker beoordeeld en waar mogelijk als waarschuwing behandeld.
+
+### Opgelost
+
+- Overdrachten stoppen niet meer direct bij behandelbare rsync-waarschuwingen.
+- Bronverwijdering geeft betere diagnostiek bij `Resource busy`.
+- Verwijderen wordt opnieuw geprobeerd voordat de bron als niet verwijderd wordt gemeld.
+- Mismatch-overwrite gebruikt robuustere kopie en timestamp-herstel.
+- Dupcheck krijgt minder valse meldingen door ontbrekende of verkeerde datestamps.
+- Xattr `Permission denied` telt niet meer als inhoudelijke bestandsmismatch.
+- UI-spacing rond opties en statusregels is verbeterd.
+- Het statusscherm toont het bestand waarmee rsync op dat moment bezig is.
+
+## [0.3.x en eerder] - voor 2026-06-10
+
+### Basisfunctionaliteit
+
+- Eerste macOS AppKit-versie van MoveFolders.
+- Bron- en doeltabellen met mapnavigatie.
+- Sorteren op naam en datum.
+- Overdracht via rsync.
+- Post-verify tussen bron en doel.
+- Mismatch-afhandeling voor bestaande of afwijkende bestanden.
+- Debugvenster met logregels.
+- App-icoon en basis packaging-bestanden.

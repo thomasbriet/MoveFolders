@@ -4,6 +4,8 @@ MoveFolders is een macOS AppKit tool om projectmappen tussen volumes/netwerkschi
 
 De app onthoudt de 5 laatst gebruikte bronpaden en toont die via de dropdown `Laatste bronnen`.
 
+Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
+
 ## Build
 
 ```bash
