@@ -2,6 +2,21 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.6.2] - 2026-07-01
+
+### Opgelost
+
+- Hoofdvenster-layout blijft stabiel bij vergroten en verkleinen.
+- Linker- en rechterkolom worden opnieuw berekend op basis van de actuele venstergrootte.
+- Bron- en doelvelden, dropdowns, optie-checkboxes, padknoppen en tabellen overlappen niet meer bij resize.
+- Tabellen behouden bruikbare minimale afmetingen.
+
+### Gewijzigd
+
+- Minimale venster- en contentgrootte ingesteld voor het hoofdvenster.
+- AppKit autoresizing masks voor het hoofdvenster vervangen door centrale layoutlogica.
+- Standaard buildversie in `scripts/build_release.sh` verhoogd naar `0.6.2`.
+
 ## [0.6.1] - 2026-07-01
 
 ### Toegevoegd

@@ -351,7 +351,7 @@ class MismatchWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-class Controller: NSObject {
+class Controller: NSObject, NSWindowDelegate {
     let defaultServer = "/Volumes/Archief/Artikelen-werkbestanden"
     let defaultLocal = "/Volumes/999 Games/01_Games"
     let updateGitHubOwner = "thomasbriet"
@@ -464,6 +464,8 @@ class Controller: NSObject {
     var dstTable: NSTableView!
     var srcAdapter = TableAdapter()
     var dstAdapter = TableAdapter()
+    var srcLabel: NSTextField!
+    var dstLabel: NSTextField!
     var srcField: NSTextField!
     var dstField: NSTextField!
     var recentSourcePopup: NSPopUpButton!
@@ -473,6 +475,16 @@ class Controller: NSObject {
     var skipEmptyFoldersCheckbox: NSButton!
     var deleteSourceCheckbox: NSButton!
     var xattrsCheckbox: NSButton!
+    var startCopyButton: NSButton!
+    var debugButton: NSButton!
+    var updatesButton: NSButton!
+    var chooseSrcButton: NSButton!
+    var swapPathsButton: NSButton!
+    var chooseDstButton: NSButton!
+    var applySrcButton: NSButton!
+    var backSrcButton: NSButton!
+    var applyDstButton: NSButton!
+    var backDstButton: NSButton!
     var preScanEnabled = false
     var skipEmptyFoldersEnabled = true
     var deleteSourceEnabled = true
@@ -610,37 +622,42 @@ class Controller: NSObject {
 
         let frame = NSRect(x: 0, y: 0, width: 1100, height: 600)
         window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.minSize = NSSize(width: 980, height: 560)
+        window.contentMinSize = NSSize(width: 980, height: 540)
+        window.delegate = self
         window.center()
         window.title = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "MoveFolders"
 
         let content = window.contentView!
 
-        func makeLabel(_ text: String, _ x: CGFloat, _ y: CGFloat) {
+        func makeLabel(_ text: String, _ x: CGFloat, _ y: CGFloat) -> NSTextField {
             let lbl = NSTextField(labelWithString: text)
             lbl.frame = NSRect(x: x, y: y, width: 60, height: 20)
-            lbl.autoresizingMask = [.maxXMargin, .minYMargin]
+            lbl.autoresizingMask = []
             content.addSubview(lbl)
+            return lbl
         }
 
         func makeTextField(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ val: String) -> NSTextField {
             let tf = NSTextField(frame: NSRect(x: x, y: y, width: w, height: 24))
             tf.stringValue = val
-            tf.autoresizingMask = [.width, .minYMargin]
+            tf.autoresizingMask = []
             content.addSubview(tf)
             return tf
         }
 
-        func makeButton(_ title: String, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin]) {
+        func makeButton(_ title: String, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSButton {
             let btn = NSButton(frame: NSRect(x: x, y: y, width: w, height: h))
             btn.title = title
             btn.bezelStyle = .rounded
             btn.target = self
             btn.action = action
-            btn.autoresizingMask = mask
+            btn.autoresizingMask = []
             content.addSubview(btn)
+            return btn
         }
 
-        func makeImageButton(_ imageName: NSImage.Name, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin]) {
+        func makeImageButton(_ imageName: NSImage.Name, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSButton {
             let btn = NSButton(frame: NSRect(x: x, y: y, width: size, height: size))
             btn.bezelStyle = .texturedRounded
             btn.image = NSImage(named: imageName)
@@ -648,15 +665,16 @@ class Controller: NSObject {
             btn.imagePosition = .imageOnly
             btn.target = self
             btn.action = action
-            btn.autoresizingMask = mask
+            btn.autoresizingMask = []
             content.addSubview(btn)
+            return btn
         }
 
         func makeRecentSourcePopup(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat) -> NSPopUpButton {
             let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: w, height: 26), pullsDown: true)
             pop.target = self
             pop.action = #selector(selectRecentSource)
-            pop.autoresizingMask = [.maxXMargin, .minYMargin]
+            pop.autoresizingMask = []
             content.addSubview(pop)
             return pop
         }
@@ -664,7 +682,7 @@ class Controller: NSObject {
         func makeTable(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> NSTableView {
             let scroll = NSScrollView(frame: NSRect(x: x, y: y, width: w, height: h))
             scroll.hasVerticalScroller = true
-            scroll.autoresizingMask = [.width, .height]
+            scroll.autoresizingMask = []
             let table = NSTableView(frame: scroll.bounds)
             table.autoresizingMask = [.width, .height]
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
@@ -683,11 +701,10 @@ class Controller: NSObject {
             return table
         }
 
-        makeLabel("Bron:", 20, 560)
-        makeLabel("Doel:", 570, 560)
+        srcLabel = makeLabel("Bron:", 20, 560)
+        dstLabel = makeLabel("Doel:", 570, 560)
         srcField = makeTextField(80, 556, 420, defaultServer)
         dstField = makeTextField(630, 556, 420, defaultLocal)
-        dstField.autoresizingMask = [.minXMargin, .width, .minYMargin]
         recentSourcePaths = loadRecentSourcePaths()
         recentSourcePopup = makeRecentSourcePopup(380, 575, 180)
         refreshRecentSourceMenu()
@@ -695,7 +712,7 @@ class Controller: NSObject {
         func makeSort(_ x: CGFloat, _ y: CGFloat, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSPopUpButton {
             let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: 150, height: 26), pullsDown: false)
             pop.addItems(withTitles: ["Naam A-Z", "Naam Z-A", "Datum oud-nieuw", "Datum nieuw-oud"])
-            pop.autoresizingMask = mask
+            pop.autoresizingMask = []
             content.addSubview(pop)
             return pop
         }
@@ -703,31 +720,29 @@ class Controller: NSObject {
         dstSort = makeSort(780, 520, mask: [.minXMargin, .minYMargin])
         preScanCheckbox = NSButton(checkboxWithTitle: "Pre-scan (tellen bestanden)", target: self, action: #selector(togglePreScan))
         preScanCheckbox.frame = NSRect(x: 500, y: 520, width: 260, height: 22)
-        preScanCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
+        preScanCheckbox.autoresizingMask = []
         content.addSubview(preScanCheckbox)
         skipEmptyFoldersCheckbox = NSButton(checkboxWithTitle: "Lege mappen overslaan", target: self, action: #selector(toggleSkipEmptyFolders))
         skipEmptyFoldersCheckbox.frame = NSRect(x: 500, y: 498, width: 260, height: 22)
         skipEmptyFoldersCheckbox.state = .on
-        skipEmptyFoldersCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
+        skipEmptyFoldersCheckbox.autoresizingMask = []
         content.addSubview(skipEmptyFoldersCheckbox)
         deleteSourceCheckbox = NSButton(checkboxWithTitle: "Bron verwijderen na overdracht", target: self, action: #selector(toggleDeleteSource))
         deleteSourceCheckbox.frame = NSRect(x: 500, y: 476, width: 300, height: 22)
         deleteSourceCheckbox.state = .on
-        deleteSourceCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
+        deleteSourceCheckbox.autoresizingMask = []
         content.addSubview(deleteSourceCheckbox)
         xattrsCheckbox = NSButton(checkboxWithTitle: "Bestandsattributen (xattrs) kopiëren", target: self, action: #selector(toggleXattrs))
         xattrsCheckbox.frame = NSRect(x: 500, y: 454, width: 320, height: 22)
         xattrsCheckbox.state = copyXattrsEnabled ? .on : .off
-        xattrsCheckbox.autoresizingMask = [.minXMargin, .minYMargin]
+        xattrsCheckbox.autoresizingMask = []
         content.addSubview(xattrsCheckbox)
 
         // Keep clear spacing under the option checkboxes and path buttons.
         let tableY: CGFloat = 80
         let tableHeight: CGFloat = 334
         srcTable = makeTable(20, tableY, 520, tableHeight)
-        srcTable.enclosingScrollView?.autoresizingMask = [.width, .height]
         dstTable = makeTable(600, tableY, 520, tableHeight)
-        dstTable.enclosingScrollView?.autoresizingMask = [.minXMargin, .width, .height]
 
         srcTable.dataSource = srcAdapter
         srcTable.delegate = srcAdapter
@@ -738,16 +753,17 @@ class Controller: NSObject {
         dstTable.target = self
         dstTable.doubleAction = #selector(openDstItem)
 
-        makeButton("Overdracht beginnen", 820, 575, 220, 32, #selector(startCopy), mask: [.minXMargin, .minYMargin])
-        makeButton("Debug", 700, 575, 110, 32, #selector(toggleDebug), mask: [.minXMargin, .minYMargin])
-        makeButton("Updates", 580, 575, 110, 32, #selector(checkForUpdates), mask: [.minXMargin, .minYMargin])
-        makeImageButton(NSImage.folderName, 510, 554, 28, #selector(chooseSrc))
-        makeImageButton(NSImage.refreshTemplateName, 535, 554, 28, #selector(swapPaths))
-        makeImageButton(NSImage.folderName, 1060, 554, 28, #selector(chooseDst), mask: [.minXMargin, .minYMargin])
-        makeButton("Gebruik bronpad", 20, 424, 150, 26, #selector(applySrc))
-        makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
-        makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
-        makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
+        startCopyButton = makeButton("Overdracht beginnen", 820, 575, 220, 32, #selector(startCopy), mask: [.minXMargin, .minYMargin])
+        debugButton = makeButton("Debug", 700, 575, 110, 32, #selector(toggleDebug), mask: [.minXMargin, .minYMargin])
+        updatesButton = makeButton("Updates", 580, 575, 110, 32, #selector(checkForUpdates), mask: [.minXMargin, .minYMargin])
+        chooseSrcButton = makeImageButton(NSImage.folderName, 510, 554, 28, #selector(chooseSrc))
+        swapPathsButton = makeImageButton(NSImage.refreshTemplateName, 535, 554, 28, #selector(swapPaths))
+        chooseDstButton = makeImageButton(NSImage.folderName, 1060, 554, 28, #selector(chooseDst), mask: [.minXMargin, .minYMargin])
+        applySrcButton = makeButton("Gebruik bronpad", 20, 424, 150, 26, #selector(applySrc))
+        backSrcButton = makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
+        applyDstButton = makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
+        backDstButton = makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
+        layoutMainWindow()
 
         refreshSrc()
         refreshDst()
@@ -760,6 +776,80 @@ class Controller: NSObject {
         setAppIcon()
         app.activate(ignoringOtherApps: true)
         app.run()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        layoutMainWindow()
+    }
+
+    func layoutMainWindow() {
+        guard let content = window?.contentView,
+              srcField != nil,
+              dstField != nil,
+              srcTable != nil,
+              dstTable != nil else { return }
+
+        let bounds = content.bounds
+        let width = max(bounds.width, 980)
+        let height = max(bounds.height, 540)
+        let margin: CGFloat = 20
+        let columnGap: CGFloat = 60
+        let columnWidth = max(420, (width - (2 * margin) - columnGap) / 2)
+        let leftX = margin
+        let rightX = leftX + columnWidth + columnGap
+        let rowHeight: CGFloat = 24
+        let iconSize: CGFloat = 28
+
+        let topButtonY = height - 42
+        let fieldY = height - 76
+        let sortY = height - 112
+        let optionX = max(leftX + columnWidth + 10, rightX - 80)
+        let pathButtonY = sortY - 96
+        let tableY: CGFloat = 80
+        let tableHeight = max(170, pathButtonY - tableY - 10)
+
+        let startW: CGFloat = 220
+        let smallButtonW: CGFloat = 110
+        let buttonGap: CGFloat = 10
+        startCopyButton.frame = NSRect(x: width - margin - startW, y: topButtonY, width: startW, height: 32)
+        debugButton.frame = NSRect(x: startCopyButton.frame.minX - buttonGap - smallButtonW, y: topButtonY, width: smallButtonW, height: 32)
+        updatesButton.frame = NSRect(x: debugButton.frame.minX - buttonGap - smallButtonW, y: topButtonY, width: smallButtonW, height: 32)
+
+        let recentW = min(220, max(170, columnWidth * 0.36))
+        recentSourcePopup.frame = NSRect(x: leftX + columnWidth - recentW, y: topButtonY + 3, width: recentW, height: 26)
+
+        srcLabel.frame = NSRect(x: leftX, y: fieldY + 3, width: 50, height: 20)
+        let srcIconX = leftX + columnWidth - (2 * iconSize) - 2
+        srcField.frame = NSRect(x: leftX + 60, y: fieldY, width: max(180, srcIconX - (leftX + 60) - 8), height: rowHeight)
+        chooseSrcButton.frame = NSRect(x: srcIconX, y: fieldY - 2, width: iconSize, height: iconSize)
+        swapPathsButton.frame = NSRect(x: srcIconX + iconSize + 2, y: fieldY - 2, width: iconSize, height: iconSize)
+
+        dstLabel.frame = NSRect(x: rightX, y: fieldY + 3, width: 50, height: 20)
+        let dstIconX = rightX + columnWidth - iconSize
+        dstField.frame = NSRect(x: rightX + 60, y: fieldY, width: max(180, dstIconX - (rightX + 60) - 8), height: rowHeight)
+        chooseDstButton.frame = NSRect(x: dstIconX, y: fieldY - 2, width: iconSize, height: iconSize)
+
+        srcSort.frame = NSRect(x: leftX + columnWidth - 150, y: sortY, width: 150, height: 26)
+        dstSort.frame = NSRect(x: rightX + columnWidth - 150, y: sortY, width: 150, height: 26)
+
+        preScanCheckbox.frame = NSRect(x: optionX, y: sortY, width: 260, height: 22)
+        skipEmptyFoldersCheckbox.frame = NSRect(x: optionX, y: sortY - 22, width: 260, height: 22)
+        deleteSourceCheckbox.frame = NSRect(x: optionX, y: sortY - 44, width: 300, height: 22)
+        xattrsCheckbox.frame = NSRect(x: optionX, y: sortY - 66, width: 320, height: 22)
+
+        applySrcButton.frame = NSRect(x: leftX, y: pathButtonY, width: 150, height: 26)
+        backSrcButton.frame = NSRect(x: leftX + 160, y: pathButtonY, width: 80, height: 26)
+        applyDstButton.frame = NSRect(x: rightX + 100, y: pathButtonY, width: 150, height: 26)
+        backDstButton.frame = NSRect(x: rightX + 260, y: pathButtonY, width: 80, height: 26)
+
+        let srcTableFrame = NSRect(x: leftX, y: tableY, width: columnWidth, height: tableHeight)
+        let dstTableFrame = NSRect(x: rightX, y: tableY, width: columnWidth, height: tableHeight)
+        srcTable.enclosingScrollView?.frame = srcTableFrame
+        dstTable.enclosingScrollView?.frame = dstTableFrame
+        srcTable.frame = NSRect(origin: .zero, size: srcTableFrame.size)
+        dstTable.frame = NSRect(origin: .zero, size: dstTableFrame.size)
+        srcTable.tableColumns.first?.width = max(100, columnWidth - 20)
+        dstTable.tableColumns.first?.width = max(100, columnWidth - 20)
     }
 
     @objc func chooseSrc() {
