@@ -2929,20 +2929,80 @@ class Controller: NSObject {
 
         let alert = NSAlert()
         alert.messageText = "Update beschikbaar"
-        alert.informativeText = "Huidig: \(currentVersion)\nNieuw: \(latestVersion)"
+        alert.informativeText = "Huidig: \(currentVersion)\nNieuw: \(latestVersion)\n\nMoveFolders downloadt de installer en sluit daarna, zodat de update de bestaande app kan vervangen."
         let hasPackage = packageURLString != nil
         if hasPackage {
-            alert.addButton(withTitle: "Download installer")
+            alert.addButton(withTitle: "Download en open installer")
         }
         alert.addButton(withTitle: "Open release")
         alert.addButton(withTitle: "Later")
         let response = alert.runModal()
 
         if hasPackage, response == .alertFirstButtonReturn, let pkgURLString = packageURLString, let pkgURL = URL(string: pkgURLString) {
-            NSWorkspace.shared.open(pkgURL)
+            downloadAndOpenUpdate(packageURL: pkgURL, latestVersion: latestVersion)
         } else if response == (hasPackage ? .alertSecondButtonReturn : .alertFirstButtonReturn), let releaseURL = URL(string: releaseURLString) {
             NSWorkspace.shared.open(releaseURL)
         }
+    }
+
+    func downloadAndOpenUpdate(packageURL: URL, latestVersion: String) {
+        guard progressWindow == nil else {
+            alert("Wacht tot de lopende overdracht klaar is voordat je een update installeert.")
+            return
+        }
+
+        log("Update download start: \(packageURL.absoluteString)")
+        let task = URLSession.shared.downloadTask(with: packageURL) { tempURL, response, error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.alert("Update downloaden mislukt:\n\(error.localizedDescription)")
+                }
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                DispatchQueue.main.async {
+                    self.alert("Update downloaden mislukt: HTTP \(http.statusCode).")
+                }
+                return
+            }
+            guard let tempURL = tempURL else {
+                DispatchQueue.main.async {
+                    self.alert("Update downloaden mislukt: geen tijdelijk bestand ontvangen.")
+                }
+                return
+            }
+
+            let fm = FileManager.default
+            let downloads = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+            let fallbackName = "MoveFolders_\(latestVersion.replacingOccurrences(of: "v", with: ""))_installer.pkg"
+            let fileName = packageURL.lastPathComponent.isEmpty ? fallbackName : packageURL.lastPathComponent
+            let targetURL = downloads.appendingPathComponent(fileName)
+
+            do {
+                if fm.fileExists(atPath: targetURL.path) {
+                    try fm.removeItem(at: targetURL)
+                }
+                try fm.moveItem(at: tempURL, to: targetURL)
+            } catch {
+                DispatchQueue.main.async {
+                    self.alert("Update downloaden gelukt, maar bewaren mislukt:\n\(error.localizedDescription)")
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.log("Update installer opgeslagen: \(targetURL.path)")
+                if NSWorkspace.shared.open(targetURL) {
+                    self.log("Update installer geopend; app sluit voor installatie")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        NSApp.terminate(nil)
+                    }
+                } else {
+                    self.alert("Installer kon niet geopend worden:\n\(targetURL.path)")
+                }
+            }
+        }
+        task.resume()
     }
 
     func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult {

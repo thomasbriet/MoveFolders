@@ -2,6 +2,20 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.6] - 2026-07-01
+
+### Toegevoegd
+
+- Update-installers gebruiken vanaf deze versie een vaste appnaam: `MoveFolders.app`.
+- Update-installers gebruiken een vaste bundle-id en package-id, zodat macOS nieuwe versies als dezelfde app ziet.
+- Package-installatie ruimt oude versie-genummerde apps op, zoals `MoveFolders_v0.5.app`.
+- De updateknop downloadt de `.pkg` naar Downloads, opent de installer automatisch en sluit MoveFolders voor installatie.
+
+### Gewijzigd
+
+- Release-artifacts blijven versie-genummerd, maar de appbundle in de zip/pkg heet voortaan `MoveFolders.app`.
+- Standaard buildversie in `scripts/build_release.sh` verhoogd naar `0.6`.
+
 ## [0.5] - 2026-07-01
 
 ### Toegevoegd

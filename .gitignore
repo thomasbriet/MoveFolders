@@ -5,6 +5,6 @@
 *.zip
 *.xcarchive
 *.dSYM/
+.build/
 _oud/
 naamloze map/
-

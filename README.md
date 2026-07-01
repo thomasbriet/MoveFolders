@@ -9,14 +9,14 @@ Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.5
+./scripts/build_release.sh 0.6
 ```
 
 Dit maakt lokaal:
 
-- `MoveFolders_v0.5.app`
-- `MoveFolders_v0.5_share.zip`
-- `MoveFolders_v0.5_installer.pkg`
+- `MoveFolders.app`
+- `MoveFolders_v0.6_share.zip`
+- `MoveFolders_v0.6_installer.pkg`
 
 ## Updates
 
@@ -29,7 +29,9 @@ let updateGitHubOwner = "thomasbriet"
 let updateGitHubRepo = "MoveFolders"
 ```
 
-Publiceer nieuwe installers als GitHub Release assets, bijvoorbeeld met tag `v0.5`, `v0.6`, enzovoort.
+Publiceer nieuwe installers als GitHub Release assets, bijvoorbeeld met tag `v0.6`, `v0.7`, enzovoort.
+
+Vanaf versie `0.6` installeert de package altijd naar `/Applications/MoveFolders.app`. Oudere appbundles zoals `/Applications/MoveFolders_v0.5.app` worden tijdens installatie opgeruimd.
 
 ## Automatische release
 
