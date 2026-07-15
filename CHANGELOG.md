@@ -2,6 +2,14 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.7.1] - 2026-07-15
+
+### Gewijzigd
+
+- Overdrachtscherm toont nu aparte ETA's voor het huidige bestand, de huidige map en de totale opdracht.
+- De snelheidsregel is gescheiden van de ETA-regel zodat lange voortgangsteksten minder snel door elkaar lopen.
+- Standaard buildversie in `scripts/build_release.sh` verhoogd naar `0.7.1`.
+
 ## [0.7] - 2026-07-15
 
 ### Toegevoegd

@@ -524,6 +524,8 @@ class Controller: NSObject, NSWindowDelegate {
     var progressEtaText: String = ""
     var progressSpeedText: String = ""
     var progressCurrentFilePercent: Int?
+    var progressTransferStartDate: Date?
+    var progressTaskStartDate: Date?
     var isCopying: Bool = false
     var progressTaskOrder: [String] = []
     var progressTaskFileTotals: [String: Int] = [:]
@@ -1010,11 +1012,11 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func showProgress(_ message: String, detail: String) {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 780, height: 230),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 780, height: 250),
                             styleMask: [.titled, .closable, .resizable],
                             backing: .buffered,
                             defer: false)
-        panel.contentMinSize = NSSize(width: 640, height: 220)
+        panel.contentMinSize = NSSize(width: 640, height: 240)
         panel.title = "Overdracht bezig..."
         panel.titleVisibility = .visible
         panel.titlebarAppearsTransparent = false
@@ -1028,10 +1030,11 @@ class Controller: NSObject, NSWindowDelegate {
 
         let labelWidth = content.bounds.width - 40
         let labelHeight: CGFloat = 20
-        let speedY: CGFloat = 185
-        let topY: CGFloat = 150
-        let midY: CGFloat = 100
-        let bottomY: CGFloat = 50
+        let speedY: CGFloat = 205
+        let etaY: CGFloat = 182
+        let topY: CGFloat = 145
+        let midY: CGFloat = 95
+        let bottomY: CGFloat = 45
 
         func makeLine(_ text: String, _ y: CGFloat, alignment: NSTextAlignment = .center, rightInset: CGFloat = 0) -> NSTextField {
             let lbl = NSTextField(labelWithString: text)
@@ -1058,15 +1061,16 @@ class Controller: NSObject, NSWindowDelegate {
             return bar
         }
 
-        self.progressBarTop = makeProgressBar(135)
-        self.progressBarMid = makeProgressBar(85)
-        self.progressBarBottom = makeProgressBar(35)
+        self.progressBarTop = makeProgressBar(130)
+        self.progressBarMid = makeProgressBar(80)
+        self.progressBarBottom = makeProgressBar(30)
 
         self.progressSpeed = makeLine("Snelheid: -", speedY, alignment: .left, rightInset: 190)
+        self.progressEta = makeLine("ETA bestand: - | map: - | opdracht: -", etaY, alignment: .left)
         self.progressLabel = makeLine(message, topY)
         self.progressDetail = makeLine(detail, midY)
         self.progressPhase = makeLine("Voorbereiden...", bottomY)
-        let cancelButton = NSButton(frame: NSRect(x: content.bounds.width - 190, y: 184, width: 170, height: 26))
+        let cancelButton = NSButton(frame: NSRect(x: content.bounds.width - 190, y: 204, width: 170, height: 26))
         cancelButton.title = "Annuleer overdracht"
         cancelButton.bezelStyle = .rounded
         cancelButton.target = self
@@ -1079,6 +1083,8 @@ class Controller: NSObject, NSWindowDelegate {
 
         self.progressFallbackMessage = message
         self.progressFallbackDetail = detail
+        self.progressTransferStartDate = Date()
+        self.progressTaskStartDate = nil
         self.isCopying = false
         self.updateProgressBars()
         self.progressWindow = panel
@@ -1117,6 +1123,8 @@ class Controller: NSObject, NSWindowDelegate {
         progressEtaText = ""
         progressSpeedText = ""
         progressCurrentFilePercent = nil
+        progressTransferStartDate = nil
+        progressTaskStartDate = nil
         isCopying = false
         progressTaskOrder = []
         progressTaskFileTotals = [:]
@@ -1297,6 +1305,28 @@ class Controller: NSObject, NSWindowDelegate {
         return String(format: "%.2f MB/s", mbps)
     }
 
+    func formatEtaDuration(_ interval: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(interval.rounded()))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours >= 100 {
+            return "\(hours)u \(minutes)m"
+        }
+        return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    func estimatedEtaText(startedAt: Date?, percent: Int) -> String {
+        let pct = max(0, min(100, percent))
+        guard pct > 0 else { return "-" }
+        if pct >= 100 { return "0:00:00" }
+        guard let startedAt = startedAt else { return "-" }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard elapsed >= 2 else { return "-" }
+        let remaining = elapsed * (Double(100 - pct) / Double(pct))
+        return formatEtaDuration(remaining)
+    }
+
     func updateProgressMetrics(speed: String?, eta: String?) {
         guard speed != nil || eta != nil else { return }
         DispatchQueue.main.async {
@@ -1365,6 +1395,10 @@ class Controller: NSObject, NSWindowDelegate {
             self.progressEtaText = ""
             self.progressSpeedText = ""
             self.progressCurrentFilePercent = nil
+            self.progressTaskStartDate = Date()
+            if self.progressTransferStartDate == nil {
+                self.progressTransferStartDate = self.progressTaskStartDate
+            }
             self.refreshProgressLines()
         }
     }
@@ -1482,8 +1516,11 @@ class Controller: NSObject, NSWindowDelegate {
         let bottomPercentText = "\(percents.overall)%"
 
         let speedText = progressSpeedText.isEmpty ? "Snelheid: -" : "Snelheid: \(progressSpeedText)"
-        let etaText = progressEtaText.isEmpty ? "" : " | Resterend: \(progressEtaText)"
-        progressSpeed?.stringValue = "\(speedText)\(etaText)"
+        progressSpeed?.stringValue = speedText
+        let fileEtaText = progressEtaText.isEmpty ? "-" : progressEtaText
+        let mapEtaText = estimatedEtaText(startedAt: progressTaskStartDate, percent: percents.map)
+        let totalEtaText = estimatedEtaText(startedAt: progressTransferStartDate, percent: percents.overall)
+        progressEta?.stringValue = "ETA bestand: \(fileEtaText) | map: \(mapEtaText) | opdracht: \(totalEtaText)"
 
         if fileName.isEmpty {
             top.stringValue = "Bestand: wachten op rsync... (\(topPercentText))"
