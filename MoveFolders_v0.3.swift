@@ -471,6 +471,8 @@ class Controller: NSObject, NSWindowDelegate {
     var srcField: NSTextField!
     var dstField: NSTextField!
     var recentSourcePopup: NSPopUpButton!
+    var recentDestinationPopup: NSPopUpButton!
+    var favoritePopup: NSPopUpButton!
     var srcSort: NSPopUpButton!
     var dstSort: NSPopUpButton!
     var preScanCheckbox: NSButton!
@@ -480,6 +482,8 @@ class Controller: NSObject, NSWindowDelegate {
     var startCopyButton: NSButton!
     var debugButton: NSButton!
     var updatesButton: NSButton!
+    var resumeButton: NSButton!
+    var saveFavoriteButton: NSButton!
     var chooseSrcButton: NSButton!
     var swapPathsButton: NSButton!
     var chooseDstButton: NSButton!
@@ -527,11 +531,18 @@ class Controller: NSObject, NSWindowDelegate {
     var srcHistory: [String] = []
     var dstHistory: [String] = []
     var recentSourcePaths: [String] = []
+    var recentDestinationPaths: [String] = []
+    var favoritePresets: [FavoriteTransferPreset] = []
+    var lastResumeJob: ResumableTransferJob?
     var srcListToken: Int = 0
     var dstListToken: Int = 0
     let recentSourceDefaults = UserDefaults(suiteName: "com.thomasbriet.MoveFolders") ?? UserDefaults.standard
     let recentSourceDefaultsKey = "recentSourcePaths"
+    let recentDestinationDefaultsKey = "recentDestinationPaths"
+    let favoritePresetsDefaultsKey = "favoriteTransferPresets"
+    let resumeJobDefaultsKey = "lastResumeJob"
     let recentSourceLimit = 5
+    let favoritePresetLimit = 20
     let pendingCleanupStateQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.state")
     var pendingCleanupPaths: Set<String> = []
     let transferControlQueue = DispatchQueue(label: "MoveFolders.transferControl")
@@ -570,6 +581,31 @@ class Controller: NSObject, NSWindowDelegate {
         case disableJob
         case continueWithXattrs
         case cancelTransfer
+    }
+
+    struct TransferOptions: Codable {
+        let preScanEnabled: Bool
+        let skipEmptyFoldersEnabled: Bool
+        let deleteSourceEnabled: Bool
+        let copyXattrsEnabled: Bool
+    }
+
+    struct ResumableTransferJob: Codable {
+        let srcPath: String
+        let dstPath: String
+        let items: [String]
+        let options: TransferOptions
+        let reason: String
+        let createdAt: Date
+    }
+
+    struct FavoriteTransferPreset: Codable {
+        let id: String
+        var name: String
+        var srcPath: String
+        var dstPath: String
+        var options: TransferOptions
+        var updatedAt: Date
     }
 
     func setAppIcon() {
@@ -674,10 +710,10 @@ class Controller: NSObject, NSWindowDelegate {
             return btn
         }
 
-        func makeRecentSourcePopup(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat) -> NSPopUpButton {
+        func makePopup(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ action: Selector) -> NSPopUpButton {
             let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: w, height: 26), pullsDown: true)
             pop.target = self
-            pop.action = #selector(selectRecentSource)
+            pop.action = action
             pop.autoresizingMask = []
             content.addSubview(pop)
             return pop
@@ -710,8 +746,15 @@ class Controller: NSObject, NSWindowDelegate {
         srcField = makeTextField(80, 556, 420, defaultServer)
         dstField = makeTextField(630, 556, 420, defaultLocal)
         recentSourcePaths = loadRecentSourcePaths()
-        recentSourcePopup = makeRecentSourcePopup(380, 575, 180)
+        recentDestinationPaths = loadRecentDestinationPaths()
+        favoritePresets = loadFavoritePresets()
+        lastResumeJob = loadResumeJob()
+        recentSourcePopup = makePopup(380, 575, 180, #selector(selectRecentSource))
+        recentDestinationPopup = makePopup(380, 545, 180, #selector(selectRecentDestination))
+        favoritePopup = makePopup(20, 575, 170, #selector(selectFavoritePreset))
         refreshRecentSourceMenu()
+        refreshRecentDestinationMenu()
+        refreshFavoriteMenu()
         // Sort dropdowns
         func makeSort(_ x: CGFloat, _ y: CGFloat, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSPopUpButton {
             let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: 150, height: 26), pullsDown: false)
@@ -760,6 +803,8 @@ class Controller: NSObject, NSWindowDelegate {
         startCopyButton = makeButton("Overdracht beginnen", 820, 575, 220, 32, #selector(startCopy), mask: [.minXMargin, .minYMargin])
         debugButton = makeButton("Debug", 700, 575, 110, 32, #selector(toggleDebug), mask: [.minXMargin, .minYMargin])
         updatesButton = makeButton("Updates", 580, 575, 110, 32, #selector(checkForUpdates), mask: [.minXMargin, .minYMargin])
+        resumeButton = makeButton("Hervat", 480, 575, 90, 32, #selector(resumeLastTransfer))
+        saveFavoriteButton = makeButton("Bewaar", 200, 575, 90, 32, #selector(saveCurrentFavorite))
         chooseSrcButton = makeImageButton(NSImage.folderName, 510, 554, 28, #selector(chooseSrc))
         swapPathsButton = makeImageButton(NSImage.refreshTemplateName, 535, 554, 28, #selector(swapPaths))
         chooseDstButton = makeImageButton(NSImage.folderName, 1060, 554, 28, #selector(chooseDst), mask: [.minXMargin, .minYMargin])
@@ -767,6 +812,7 @@ class Controller: NSObject, NSWindowDelegate {
         backSrcButton = makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
         applyDstButton = makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
         backDstButton = makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
+        updateResumeButton()
         layoutMainWindow()
 
         refreshSrc()
@@ -812,15 +858,21 @@ class Controller: NSObject, NSWindowDelegate {
         let tableY: CGFloat = 80
         let tableHeight = max(170, pathButtonY - tableY - 10)
 
-        let startW: CGFloat = 220
-        let smallButtonW: CGFloat = 110
-        let buttonGap: CGFloat = 10
-        startCopyButton.frame = NSRect(x: width - margin - startW, y: topButtonY, width: startW, height: 32)
-        debugButton.frame = NSRect(x: startCopyButton.frame.minX - buttonGap - smallButtonW, y: topButtonY, width: smallButtonW, height: 32)
-        updatesButton.frame = NSRect(x: debugButton.frame.minX - buttonGap - smallButtonW, y: topButtonY, width: smallButtonW, height: 32)
-
-        let recentW = min(220, max(170, columnWidth * 0.36))
-        recentSourcePopup.frame = NSRect(x: leftX + columnWidth - recentW, y: topButtonY + 3, width: recentW, height: 26)
+        let buttonGap: CGFloat = 8
+        var toolbarX = margin
+        favoritePopup.frame = NSRect(x: toolbarX, y: topButtonY + 3, width: 160, height: 26)
+        toolbarX += 160 + buttonGap
+        saveFavoriteButton.frame = NSRect(x: toolbarX, y: topButtonY, width: 90, height: 32)
+        toolbarX += 90 + buttonGap
+        recentSourcePopup.frame = NSRect(x: toolbarX, y: topButtonY + 3, width: 170, height: 26)
+        toolbarX += 170 + buttonGap
+        resumeButton.frame = NSRect(x: toolbarX, y: topButtonY, width: 85, height: 32)
+        toolbarX += 85 + buttonGap
+        updatesButton.frame = NSRect(x: toolbarX, y: topButtonY, width: 85, height: 32)
+        toolbarX += 85 + buttonGap
+        debugButton.frame = NSRect(x: toolbarX, y: topButtonY, width: 75, height: 32)
+        toolbarX += 75 + buttonGap
+        startCopyButton.frame = NSRect(x: toolbarX, y: topButtonY, width: max(170, width - toolbarX - margin), height: 32)
 
         srcLabel.frame = NSRect(x: leftX, y: fieldY + 3, width: 50, height: 20)
         let srcIconX = leftX + columnWidth - (2 * iconSize) - 2
@@ -843,8 +895,9 @@ class Controller: NSObject, NSWindowDelegate {
 
         applySrcButton.frame = NSRect(x: leftX, y: pathButtonY, width: 150, height: 26)
         backSrcButton.frame = NSRect(x: leftX + 160, y: pathButtonY, width: 80, height: 26)
-        applyDstButton.frame = NSRect(x: rightX + 100, y: pathButtonY, width: 150, height: 26)
-        backDstButton.frame = NSRect(x: rightX + 260, y: pathButtonY, width: 80, height: 26)
+        applyDstButton.frame = NSRect(x: rightX, y: pathButtonY, width: 150, height: 26)
+        backDstButton.frame = NSRect(x: rightX + 160, y: pathButtonY, width: 80, height: 26)
+        recentDestinationPopup.frame = NSRect(x: rightX + columnWidth - 190, y: pathButtonY, width: 190, height: 26)
 
         let srcTableFrame = NSRect(x: leftX, y: tableY, width: columnWidth, height: tableHeight)
         let dstTableFrame = NSRect(x: rightX, y: tableY, width: columnWidth, height: tableHeight)
@@ -864,12 +917,12 @@ class Controller: NSObject, NSWindowDelegate {
 
     @objc func chooseDst() {
         if let p = pickFolder(start: dstField.stringValue) {
-            setDstPath(p)
+            setDstPath(p, rememberRecent: true)
         }
     }
 
     @objc func applySrc() { setSrcPath(srcField.stringValue, rememberRecent: true) }
-    @objc func applyDst() { setDstPath(dstField.stringValue) }
+    @objc func applyDst() { setDstPath(dstField.stringValue, rememberRecent: true) }
     @objc func goBackSrc() { popHistory(isSource: true) }
     @objc func goBackDst() { popHistory(isSource: false) }
     @objc func togglePreScan(_ sender: NSButton) { preScanEnabled = sender.state == .on }
@@ -889,7 +942,7 @@ class Controller: NSObject, NSWindowDelegate {
     @objc func swapPaths() {
         let tmp = srcField.stringValue
         setSrcPath(dstField.stringValue)
-        setDstPath(tmp)
+        setDstPath(tmp, rememberRecent: true)
     }
 
     func pickFolder(start: String) -> String? {
@@ -906,6 +959,54 @@ class Controller: NSObject, NSWindowDelegate {
         defer { sender.selectItem(at: 0) }
         guard let path = sender.selectedItem?.representedObject as? String else { return }
         setSrcPath(path, rememberRecent: true)
+    }
+
+    @objc func selectRecentDestination(_ sender: NSPopUpButton) {
+        defer { sender.selectItem(at: 0) }
+        guard let path = sender.selectedItem?.representedObject as? String else { return }
+        setDstPath(path, rememberRecent: true)
+    }
+
+    @objc func selectFavoritePreset(_ sender: NSPopUpButton) {
+        defer { sender.selectItem(at: 0) }
+        guard let id = sender.selectedItem?.representedObject as? String,
+              let favorite = favoritePresets.first(where: { $0.id == id }) else { return }
+        setSrcPath(favorite.srcPath, rememberRecent: true)
+        setDstPath(favorite.dstPath, rememberRecent: true)
+        applyTransferOptions(favorite.options)
+        log("Favoriet toegepast: \(favorite.name)")
+    }
+
+    @objc func saveCurrentFavorite() {
+        let alert = NSAlert()
+        alert.messageText = "Favoriet bewaren"
+        alert.informativeText = "Bewaar de huidige bron, doel en opties als favoriet."
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        let srcName = (srcField.stringValue as NSString).lastPathComponent
+        input.stringValue = srcName.isEmpty ? "Nieuwe favoriet" : srcName
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Bewaar")
+        alert.addButton(withTitle: "Annuleer")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        let preset = FavoriteTransferPreset(
+            id: UUID().uuidString,
+            name: name,
+            srcPath: normalizePath(srcField.stringValue),
+            dstPath: normalizePath(dstField.stringValue),
+            options: currentTransferOptions(),
+            updatedAt: Date()
+        )
+
+        favoritePresets.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        favoritePresets.insert(preset, at: 0)
+        if favoritePresets.count > favoritePresetLimit {
+            favoritePresets.removeSubrange(favoritePresetLimit..<favoritePresets.count)
+        }
+        saveFavoritePresets()
+        log("Favoriet bewaard: \(name)")
     }
 
     func showProgress(_ message: String, detail: String) {
@@ -1214,8 +1315,11 @@ class Controller: NSObject, NSWindowDelegate {
         schedulePendingDeleteCleanup(basePath: srcField.stringValue)
     }
 
-    func setDstPath(_ path: String) {
+    func setDstPath(_ path: String, rememberRecent: Bool = false) {
         setPath(field: dstField, newPath: path, history: &dstHistory, refresh: refreshDst)
+        if rememberRecent {
+            rememberRecentDestination(dstField.stringValue)
+        }
     }
 
     func setPhase(_ text: String) {
@@ -1472,17 +1576,36 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func normalizeSourcePath(_ path: String) -> String {
+        normalizePath(path)
+    }
+
+    func normalizePath(_ path: String) -> String {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
         return (trimmed as NSString).standardizingPath
     }
 
+    func compactPathTitle(for path: String) -> String {
+        let parts = path.split(separator: "/").map(String.init)
+        guard parts.count > 3 else { return path }
+        return ".../" + parts.suffix(3).joined(separator: "/")
+    }
+
     func loadRecentSourcePaths() -> [String] {
         let stored = recentSourceDefaults.stringArray(forKey: recentSourceDefaultsKey) ?? []
+        return cleanRecentPaths(stored)
+    }
+
+    func loadRecentDestinationPaths() -> [String] {
+        let stored = recentSourceDefaults.stringArray(forKey: recentDestinationDefaultsKey) ?? []
+        return cleanRecentPaths(stored)
+    }
+
+    func cleanRecentPaths(_ stored: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
         for rawPath in stored {
-            let path = normalizeSourcePath(rawPath)
+            let path = normalizePath(rawPath)
             guard !path.isEmpty, !seen.contains(path) else { continue }
             seen.insert(path)
             result.append(path)
@@ -1492,9 +1615,7 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func recentSourceTitle(for path: String) -> String {
-        let parts = path.split(separator: "/").map(String.init)
-        guard parts.count > 3 else { return path }
-        return ".../" + parts.suffix(3).joined(separator: "/")
+        compactPathTitle(for: path)
     }
 
     func refreshRecentSourceMenu() {
@@ -1521,8 +1642,56 @@ class Controller: NSObject, NSWindowDelegate {
         recentSourcePopup.selectItem(at: 0)
     }
 
+    func refreshRecentDestinationMenu() {
+        guard recentDestinationPopup != nil else { return }
+        recentDestinationPopup.removeAllItems()
+        recentDestinationPopup.addItem(withTitle: "Laatste doelen")
+        recentDestinationPopup.item(at: 0)?.isEnabled = false
+
+        if recentDestinationPaths.isEmpty {
+            recentDestinationPopup.addItem(withTitle: "Geen recente doelen")
+            recentDestinationPopup.lastItem?.isEnabled = false
+            recentDestinationPopup.isEnabled = false
+            recentDestinationPopup.selectItem(at: 0)
+            return
+        }
+
+        recentDestinationPopup.menu?.addItem(NSMenuItem.separator())
+        for path in recentDestinationPaths {
+            recentDestinationPopup.addItem(withTitle: compactPathTitle(for: path))
+            recentDestinationPopup.lastItem?.representedObject = path
+            recentDestinationPopup.lastItem?.toolTip = path
+        }
+        recentDestinationPopup.isEnabled = true
+        recentDestinationPopup.selectItem(at: 0)
+    }
+
+    func refreshFavoriteMenu() {
+        guard favoritePopup != nil else { return }
+        favoritePopup.removeAllItems()
+        favoritePopup.addItem(withTitle: "Favorieten")
+        favoritePopup.item(at: 0)?.isEnabled = false
+
+        if favoritePresets.isEmpty {
+            favoritePopup.addItem(withTitle: "Geen favorieten")
+            favoritePopup.lastItem?.isEnabled = false
+            favoritePopup.isEnabled = false
+            favoritePopup.selectItem(at: 0)
+            return
+        }
+
+        favoritePopup.menu?.addItem(NSMenuItem.separator())
+        for favorite in favoritePresets {
+            favoritePopup.addItem(withTitle: favorite.name)
+            favoritePopup.lastItem?.representedObject = favorite.id
+            favoritePopup.lastItem?.toolTip = "\(favorite.srcPath) -> \(favorite.dstPath)"
+        }
+        favoritePopup.isEnabled = true
+        favoritePopup.selectItem(at: 0)
+    }
+
     func rememberRecentSource(_ path: String) {
-        let normalized = normalizeSourcePath(path)
+        let normalized = normalizePath(path)
         guard !normalized.isEmpty else { return }
         recentSourcePaths.removeAll { $0 == normalized }
         recentSourcePaths.insert(normalized, at: 0)
@@ -1531,6 +1700,74 @@ class Controller: NSObject, NSWindowDelegate {
         }
         recentSourceDefaults.set(recentSourcePaths, forKey: recentSourceDefaultsKey)
         refreshRecentSourceMenu()
+    }
+
+    func rememberRecentDestination(_ path: String) {
+        let normalized = normalizePath(path)
+        guard !normalized.isEmpty else { return }
+        recentDestinationPaths.removeAll { $0 == normalized }
+        recentDestinationPaths.insert(normalized, at: 0)
+        if recentDestinationPaths.count > recentSourceLimit {
+            recentDestinationPaths.removeSubrange(recentSourceLimit..<recentDestinationPaths.count)
+        }
+        recentSourceDefaults.set(recentDestinationPaths, forKey: recentDestinationDefaultsKey)
+        refreshRecentDestinationMenu()
+    }
+
+    func currentTransferOptions() -> TransferOptions {
+        TransferOptions(
+            preScanEnabled: preScanEnabled,
+            skipEmptyFoldersEnabled: skipEmptyFoldersEnabled,
+            deleteSourceEnabled: deleteSourceEnabled,
+            copyXattrsEnabled: copyXattrsEnabled
+        )
+    }
+
+    func applyTransferOptions(_ options: TransferOptions) {
+        preScanEnabled = options.preScanEnabled
+        skipEmptyFoldersEnabled = options.skipEmptyFoldersEnabled
+        deleteSourceEnabled = options.deleteSourceEnabled
+        copyXattrsEnabled = options.copyXattrsEnabled
+        preScanCheckbox?.state = preScanEnabled ? .on : .off
+        skipEmptyFoldersCheckbox?.state = skipEmptyFoldersEnabled ? .on : .off
+        deleteSourceCheckbox?.state = deleteSourceEnabled ? .on : .off
+        xattrsCheckbox?.state = copyXattrsEnabled ? .on : .off
+    }
+
+    func loadFavoritePresets() -> [FavoriteTransferPreset] {
+        guard let data = recentSourceDefaults.data(forKey: favoritePresetsDefaultsKey),
+              let decoded = try? JSONDecoder().decode([FavoriteTransferPreset].self, from: data) else { return [] }
+        return Array(decoded.prefix(favoritePresetLimit))
+    }
+
+    func saveFavoritePresets() {
+        guard let data = try? JSONEncoder().encode(favoritePresets) else { return }
+        recentSourceDefaults.set(data, forKey: favoritePresetsDefaultsKey)
+        refreshFavoriteMenu()
+    }
+
+    func loadResumeJob() -> ResumableTransferJob? {
+        guard let data = recentSourceDefaults.data(forKey: resumeJobDefaultsKey) else { return nil }
+        return try? JSONDecoder().decode(ResumableTransferJob.self, from: data)
+    }
+
+    func storeResumeJob(_ job: ResumableTransferJob?) {
+        lastResumeJob = job
+        if let job = job, let data = try? JSONEncoder().encode(job) {
+            recentSourceDefaults.set(data, forKey: resumeJobDefaultsKey)
+            log("Hervatbare overdracht opgeslagen: \(job.items.joined(separator: ", "))")
+        } else {
+            recentSourceDefaults.removeObject(forKey: resumeJobDefaultsKey)
+            log("Geen hervatbare overdracht opgeslagen")
+        }
+        updateResumeButton()
+    }
+
+    func updateResumeButton() {
+        guard resumeButton != nil else { return }
+        let count = lastResumeJob?.items.count ?? 0
+        resumeButton.isEnabled = count > 0
+        resumeButton.toolTip = count > 0 ? "Hervat \(count) item(s) van de vorige mislukte of geannuleerde overdracht" : "Geen mislukte of geannuleerde overdracht om te hervatten"
     }
 
     func setPath(field: NSTextField, newPath: String, history: inout [String], refresh: () -> Void) {
@@ -1713,7 +1950,11 @@ class Controller: NSObject, NSWindowDelegate {
             self.setSrcPath(path, rememberRecent: false)
         }
     }
-    @objc func openDstItem() { navigateIntoSelection(table: dstTable, basePath: dstField.stringValue, setter: setDstPath) }
+    @objc func openDstItem() {
+        navigateIntoSelection(table: dstTable, basePath: dstField.stringValue) { path in
+            self.setDstPath(path, rememberRecent: false)
+        }
+    }
 
     func navigateIntoSelection(table: NSTableView, basePath: String, setter: (String) -> Void) {
         let row = table.clickedRow
@@ -2829,15 +3070,40 @@ class Controller: NSObject, NSWindowDelegate {
         }
         let srcPath = srcField.stringValue
         let dstPath = dstField.stringValue
-        rememberRecentSource(srcPath)
         let items = idxs.compactMap { i -> String? in
             guard i >= 0 && i < srcAdapter.items.count else { return nil }
             return srcAdapter.items[i].name
         }
+        startTransfer(items: items, srcPath: srcPath, dstPath: dstPath, resumed: false)
+    }
+
+    @objc func resumeLastTransfer() {
+        guard let job = lastResumeJob, !job.items.isEmpty else {
+            alert("Er is geen mislukte of geannuleerde overdracht om te hervatten.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Overdracht hervatten?"
+        alert.informativeText = "Bron: \(job.srcPath)\nDoel: \(job.dstPath)\nItems: \(summarizeList(job.items))\nReden: \(job.reason)"
+        alert.addButton(withTitle: "Hervat")
+        alert.addButton(withTitle: "Annuleer")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        setSrcPath(job.srcPath, rememberRecent: true)
+        setDstPath(job.dstPath, rememberRecent: true)
+        applyTransferOptions(job.options)
+        startTransfer(items: job.items, srcPath: job.srcPath, dstPath: job.dstPath, resumed: true)
+    }
+
+    func startTransfer(items: [String], srcPath: String, dstPath: String, resumed: Bool) {
+        guard !items.isEmpty else { return }
+        let optionsAtStart = currentTransferOptions()
+        rememberRecentSource(srcPath)
+        rememberRecentDestination(dstPath)
         resetTransferCancellation()
         resetXattrRuntimeChoices()
         let summary = items.prefix(3).joined(separator: ", ") + (items.count > 3 ? " … (+\(items.count - 3) meer)" : "")
-        log("Start copy: \(items.joined(separator: ", "))")
+        log("\(resumed ? "Hervat copy" : "Start copy"): \(items.joined(separator: ", "))")
         log("Instelling lege mappen overslaan: \(skipEmptyFoldersEnabled ? "aan" : "uit")")
         log("Instelling xattrs: \(copyXattrsEnabled ? "aan" : "uit")")
         DispatchQueue.main.async {
@@ -2851,6 +3117,8 @@ class Controller: NSObject, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             var summaries: [TransferSummary] = []
             var didCancel = false
+            var resumeItems: [String] = []
+            var resumeReason = ""
             var preScannedFileCounts: [String: Int] = [:]
             if self.preScanEnabled {
                 var totalAll = 0
@@ -2883,6 +3151,8 @@ class Controller: NSObject, NSWindowDelegate {
             transferLoop: for (idx, name) in items.enumerated() {
                 if self.isTransferCancelRequested() {
                     didCancel = true
+                    resumeItems = Array(items[idx..<items.count])
+                    resumeReason = "Geannuleerd voor \(name)"
                     break
                 }
                 // Controleer lege bronmappen voordat de doelmap wordt beoordeeld.
@@ -2900,6 +3170,8 @@ class Controller: NSObject, NSWindowDelegate {
                     }
                     if self.isTransferCancelRequested() {
                         didCancel = true
+                        resumeItems = Array(items[idx..<items.count])
+                        resumeReason = "Geannuleerd tijdens lege-mapcontrole"
                         break
                     }
                     if !hasFiles {
@@ -2958,6 +3230,8 @@ class Controller: NSObject, NSWindowDelegate {
                 case .failed(let msg):
                     self.log("Kopie mislukt: \(name)")
                     summaries.append(TransferSummary(name: name, status: .failed(msg)))
+                    resumeItems.append(name)
+                    if resumeReason.isEmpty { resumeReason = "Kopie mislukt" }
                     DispatchQueue.main.async {
                         self.refreshDst()
                         self.refreshSrc()
@@ -2966,6 +3240,8 @@ class Controller: NSObject, NSWindowDelegate {
                 case .warning(let msg):
                     self.log("Kopie met waarschuwing: \(name)")
                     summaries.append(TransferSummary(name: name, status: .warning(msg)))
+                    resumeItems.append(name)
+                    if resumeReason.isEmpty { resumeReason = "Kopie met waarschuwing" }
                     DispatchQueue.main.async {
                         self.refreshDst()
                         self.refreshSrc()
@@ -2974,6 +3250,8 @@ class Controller: NSObject, NSWindowDelegate {
                 case .cancelled:
                     self.log("Kopie geannuleerd: \(name)")
                     didCancel = true
+                    resumeItems.append(contentsOf: Array(items[idx..<items.count]))
+                    resumeReason = "Geannuleerd tijdens kopiëren"
                     break transferLoop
                 case .success:
                     break
@@ -2981,12 +3259,18 @@ class Controller: NSObject, NSWindowDelegate {
 
                 if self.isTransferCancelRequested() {
                     didCancel = true
+                    resumeItems.append(contentsOf: Array(items[idx..<items.count]))
+                    resumeReason = "Geannuleerd na kopiëren"
                     break
                 }
                 // Post-verify + opschonen per map
                 DispatchQueue.main.async { self.setPhase("Post-verify \(idx + 1)/\(items.count): \(name)") }
                 let summary = self.postCopyCheck(items: [name], srcBase: srcPath, dstBase: dstPath)
                 summaries.append(summary)
+                if case .failed(let msg) = summary.status {
+                    resumeItems.append(name)
+                    if resumeReason.isEmpty { resumeReason = msg }
+                }
                 DispatchQueue.main.async {
                     self.refreshDst()
                     self.refreshSrc()
@@ -2995,9 +3279,29 @@ class Controller: NSObject, NSWindowDelegate {
             if didCancel {
                 summaries.append(TransferSummary(name: "Overdracht", status: .warning("Geannuleerd door gebruiker")))
             }
+            var uniqueResumeItems: [String] = []
+            var seenResumeItems = Set<String>()
+            for item in resumeItems {
+                guard !seenResumeItems.contains(item) else { continue }
+                seenResumeItems.insert(item)
+                uniqueResumeItems.append(item)
+            }
             DispatchQueue.main.async {
+                if uniqueResumeItems.isEmpty {
+                    self.storeResumeJob(nil)
+                } else {
+                    let job = ResumableTransferJob(
+                        srcPath: srcPath,
+                        dstPath: dstPath,
+                        items: uniqueResumeItems,
+                        options: optionsAtStart,
+                        reason: resumeReason.isEmpty ? "Mislukte of geannuleerde items" : resumeReason,
+                        createdAt: Date()
+                    )
+                    self.storeResumeJob(job)
+                }
                 self.hideProgress()
-                self.showSummary(summaries)
+                self.showSummary(summaries, dstPath: dstPath)
             }
         }
     }
@@ -3018,7 +3322,7 @@ class Controller: NSObject, NSWindowDelegate {
         return shown
     }
 
-    func showSummary(_ summaries: [TransferSummary]) {
+    func showSummary(_ summaries: [TransferSummary], dstPath: String? = nil) {
         guard !summaries.isEmpty else { return }
         var ok: [String] = []
         var warn: [String] = []
@@ -3040,7 +3344,46 @@ class Controller: NSObject, NSWindowDelegate {
         lines.append("OK: \(summarizeList(ok))")
         lines.append("Waarschuwingen: \(summarizeList(warn))")
         lines.append("Fouten: \(summarizeList(fail))")
-        alert(lines.joined(separator: "\n"))
+
+        if let job = lastResumeJob, !job.items.isEmpty {
+            lines.append("")
+            lines.append("Hervatbaar: \(summarizeList(job.items))")
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Samenvatting overdrachten"
+        alert.informativeText = lines.dropFirst().joined(separator: "\n")
+
+        var actions: [String] = []
+        if let job = lastResumeJob, !job.items.isEmpty {
+            alert.addButton(withTitle: "Hervat")
+            actions.append("resume")
+        }
+        if dstPath != nil {
+            alert.addButton(withTitle: "Open doelmap")
+            actions.append("openDestination")
+        }
+        alert.addButton(withTitle: "Toon log")
+        actions.append("showLog")
+        alert.addButton(withTitle: "Sluit")
+        actions.append("close")
+
+        let response = alert.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        let selectedIndex = response.rawValue - first
+        guard selectedIndex >= 0 && selectedIndex < actions.count else { return }
+        switch actions[selectedIndex] {
+        case "resume":
+            resumeLastTransfer()
+        case "openDestination":
+            if let dstPath = dstPath {
+                NSWorkspace.shared.open(URL(fileURLWithPath: dstPath))
+            }
+        case "showLog":
+            showDebugWindow()
+        default:
+            break
+        }
     }
 
     func setupDebugWindow() {

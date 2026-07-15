@@ -2,6 +2,25 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.7] - 2026-07-15
+
+### Toegevoegd
+
+- Knop `Hervat` om mislukte of geannuleerde overdrachten opnieuw te proberen.
+- Mislukte, met waarschuwing gekopieerde en geannuleerde items worden opgeslagen als hervatbare opdracht.
+- Bij annuleren worden het huidige item en de resterende items klaargezet voor hervatten.
+- Dropdown `Laatste doelen` voor de 5 laatst gebruikte doelpaden.
+- Dropdown `Favorieten` voor opgeslagen combinaties van bron, doel en opties.
+- Knop `Bewaar` om de huidige bron, doel en opties als favoriet op te slaan.
+- Actiegerichte samenvatting met knoppen voor `Hervat`, `Open doelmap` en `Toon log`.
+
+### Gewijzigd
+
+- Normale start en hervatten gebruiken dezelfde overdrachtslogica.
+- Doelpaden worden onthouden bij kiezen, toepassen, favoriet gebruiken en starten van een overdracht.
+- De `Hervat`-knop is alleen actief wanneer er een hervatbare overdracht bestaat.
+- Standaard buildversie in `scripts/build_release.sh` verhoogd naar `0.7`.
+
 ## [0.6.3] - 2026-07-15
 
 ### Gewijzigd
