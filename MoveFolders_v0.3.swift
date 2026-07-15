@@ -420,7 +420,7 @@ class Controller: NSObject, NSWindowDelegate {
         return fallback
     }
 
-    func rsyncFlags(includeUpdate: Bool = false, includePartial: Bool = false, includeInplace: Bool = false, includeDryRun: Bool = false, includeItemize: Bool = false, includeProgress: Bool = false, includeStats: Bool = false, includeXattrs: Bool = true, outFormatMarker: String? = nil) -> String {
+    func rsyncFlags(includeUpdate: Bool = false, includePartial: Bool = false, includeInplace: Bool = false, includeDryRun: Bool = false, includeItemize: Bool = false, includeProgress: Bool = false, includePerFileProgress: Bool = false, includeStats: Bool = false, includeXattrs: Bool = true, outFormatMarker: String? = nil) -> String {
         var flags: [String] = ["-ah", "--modify-window=2", "--exclude '.DS_Store'"]
         let cfg = rsyncConfig
 
@@ -445,7 +445,9 @@ class Controller: NSObject, NSWindowDelegate {
         }
 
         if includeProgress {
-            if cfg.supportsInfo {
+            if includePerFileProgress {
+                flags.append("--progress")
+            } else if cfg.supportsInfo {
                 let infoItems = includeStats ? "progress2,flist2,stats2" : "progress2,flist2"
                 flags.append("--info=\(infoItems)")
             } else {
@@ -516,6 +518,8 @@ class Controller: NSObject, NSWindowDelegate {
     var progressCurrentSourcePath: String = ""
     var progressCurrentDestinationPath: String = ""
     var progressEtaText: String = ""
+    var progressSpeedText: String = ""
+    var progressCurrentFilePercent: Int?
     var isCopying: Bool = false
     var progressTaskOrder: [String] = []
     var progressTaskFileTotals: [String: Int] = [:]
@@ -905,10 +909,11 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func showProgress(_ message: String, detail: String) {
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 190),
-                            styleMask: [.titled, .closable],
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 780, height: 230),
+                            styleMask: [.titled, .closable, .resizable],
                             backing: .buffered,
                             defer: false)
+        panel.contentMinSize = NSSize(width: 640, height: 220)
         panel.title = "Overdracht bezig..."
         panel.titleVisibility = .visible
         panel.titlebarAppearsTransparent = false
@@ -922,14 +927,15 @@ class Controller: NSObject, NSWindowDelegate {
 
         let labelWidth = content.bounds.width - 40
         let labelHeight: CGFloat = 20
-        let topY: CGFloat = 135
-        let midY: CGFloat = 85
-        let bottomY: CGFloat = 35
+        let speedY: CGFloat = 185
+        let topY: CGFloat = 150
+        let midY: CGFloat = 100
+        let bottomY: CGFloat = 50
 
-        func makeLine(_ text: String, _ y: CGFloat) -> NSTextField {
+        func makeLine(_ text: String, _ y: CGFloat, alignment: NSTextAlignment = .center, rightInset: CGFloat = 0) -> NSTextField {
             let lbl = NSTextField(labelWithString: text)
-            lbl.frame = NSRect(x: 20, y: y, width: labelWidth, height: labelHeight)
-            lbl.alignment = .center
+            lbl.frame = NSRect(x: 20, y: y, width: labelWidth - rightInset, height: labelHeight)
+            lbl.alignment = alignment
             lbl.lineBreakMode = .byTruncatingMiddle
             lbl.textColor = NSColor.labelColor
             lbl.font = NSFont.systemFont(ofSize: 13, weight: .regular)
@@ -951,14 +957,15 @@ class Controller: NSObject, NSWindowDelegate {
             return bar
         }
 
-        self.progressBarTop = makeProgressBar(120)
-        self.progressBarMid = makeProgressBar(70)
-        self.progressBarBottom = makeProgressBar(20)
+        self.progressBarTop = makeProgressBar(135)
+        self.progressBarMid = makeProgressBar(85)
+        self.progressBarBottom = makeProgressBar(35)
 
+        self.progressSpeed = makeLine("Snelheid: -", speedY, alignment: .left, rightInset: 190)
         self.progressLabel = makeLine(message, topY)
         self.progressDetail = makeLine(detail, midY)
         self.progressPhase = makeLine("Voorbereiden...", bottomY)
-        let cancelButton = NSButton(frame: NSRect(x: content.bounds.width - 190, y: 150, width: 170, height: 26))
+        let cancelButton = NSButton(frame: NSRect(x: content.bounds.width - 190, y: 184, width: 170, height: 26))
         cancelButton.title = "Annuleer overdracht"
         cancelButton.bezelStyle = .rounded
         cancelButton.target = self
@@ -1007,6 +1014,8 @@ class Controller: NSObject, NSWindowDelegate {
         progressCurrentSourcePath = ""
         progressCurrentDestinationPath = ""
         progressEtaText = ""
+        progressSpeedText = ""
+        progressCurrentFilePercent = nil
         isCopying = false
         progressTaskOrder = []
         progressTaskFileTotals = [:]
@@ -1146,12 +1155,53 @@ class Controller: NSObject, NSWindowDelegate {
         return out
     }
 
-    func updateSpeedEta(from line: String) {
-        guard let etaRange = line.range(of: #"[0-9]+:[0-9]{2}:[0-9]{2}"#, options: .regularExpression) else { return }
-        let eta = String(line[etaRange])
+    func rsyncProgressMetrics(from line: String) -> (percent: Int, speed: String?, eta: String?, toCheck: String?)? {
+        guard let pctRange = line.range(of: #"([0-9]+)%"#, options: .regularExpression),
+              let percent = Int(line[pctRange].replacingOccurrences(of: "%", with: "")) else { return nil }
+
+        let speed = line.range(of: #"[0-9]+(?:[.,][0-9]+)?\s*[KMGTPE]?B/s"#, options: [.regularExpression, .caseInsensitive]).map {
+            formatSpeedInMBPerSecond(String(line[$0]))
+        }
+        let eta = line.range(of: #"[0-9]+:[0-9]{2}:[0-9]{2}"#, options: .regularExpression).map {
+            String(line[$0])
+        }
+        let toCheck = line.range(of: #"(?:to-chk|to-check|ir-chk)=[0-9]+/[0-9]+"#, options: .regularExpression).map {
+            String(line[$0])
+        }
+        return (max(0, min(100, percent)), speed, eta, toCheck)
+    }
+
+    func formatSpeedInMBPerSecond(_ raw: String) -> String {
+        let cleaned = raw
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: ",", with: ".")
+        guard let numberRange = cleaned.range(of: #"[0-9]+(?:\.[0-9]+)?"#, options: .regularExpression),
+              let value = Double(cleaned[numberRange]) else {
+            return raw
+        }
+
+        let lower = cleaned.lowercased()
+        let mbps: Double
+        if lower.contains("gb/s") {
+            mbps = value * 1024.0
+        } else if lower.contains("tb/s") {
+            mbps = value * 1024.0 * 1024.0
+        } else if lower.contains("kb/s") {
+            mbps = value / 1024.0
+        } else if lower.contains("b/s") && !lower.contains("mb/s") {
+            mbps = value / 1024.0 / 1024.0
+        } else {
+            mbps = value
+        }
+        return String(format: "%.2f MB/s", mbps)
+    }
+
+    func updateProgressMetrics(speed: String?, eta: String?) {
+        guard speed != nil || eta != nil else { return }
         DispatchQueue.main.async {
             guard self.isCopying else { return }
-            self.progressEtaText = eta
+            if let speed = speed { self.progressSpeedText = speed }
+            if let eta = eta { self.progressEtaText = eta }
             self.refreshProgressLines()
         }
     }
@@ -1209,16 +1259,28 @@ class Controller: NSObject, NSWindowDelegate {
             }
             self.progressPct = 0
             self.progressEtaText = ""
+            self.progressSpeedText = ""
+            self.progressCurrentFilePercent = nil
             self.refreshProgressLines()
         }
     }
 
-    func updateProgressFromRsync(percent: Int, toChk: String?) {
+    func updateCurrentFileProgress(percent: Int) {
         DispatchQueue.main.async {
             guard self.isCopying else { return }
-            self.progressPct = percent
+            self.progressCurrentFilePercent = max(0, min(100, percent))
+            self.refreshProgressLines()
+        }
+    }
+
+    func updateProgressFromRsync(toChk: String?) {
+        DispatchQueue.main.async {
+            guard self.isCopying else { return }
             if let toChk = toChk {
-                let cleaned = toChk.replacingOccurrences(of: "to-chk=", with: "")
+                let cleaned = toChk
+                    .replacingOccurrences(of: "to-chk=", with: "")
+                    .replacingOccurrences(of: "to-check=", with: "")
+                    .replacingOccurrences(of: "ir-chk=", with: "")
                 let parts = cleaned.split(separator: "/")
                 if parts.count == 2 {
                     let remaining = Int(parts[0].filter { $0.isNumber })
@@ -1226,6 +1288,7 @@ class Controller: NSObject, NSWindowDelegate {
                     if let remaining = remaining, let total = total, total > 0 {
                         self.progressFileTotal = total
                         self.progressFileDone = max(0, total - remaining)
+                        self.progressPct = Int(round(Double(max(0, total - remaining)) / Double(total) * 100.0))
                     }
                 }
             }
@@ -1307,15 +1370,22 @@ class Controller: NSObject, NSWindowDelegate {
     func refreshProgressLines() {
         guard let top = progressLabel, let mid = progressDetail, let bottom = progressPhase else { return }
         let taskName = progressTaskName.isEmpty ? progressFallbackDetail : progressTaskName
-        let fileName = progressCurrentFile.isEmpty ? taskName : progressCurrentFile
+        let fileName = progressCurrentFile
         let filePath = progressCurrentPath.isEmpty ? "" : progressCurrentPath
-        let etaPart = progressEtaText.isEmpty ? "" : " less than \(progressEtaText)"
         let percents = computeProgressPercents()
         let topPercentText = "\(percents.file)%"
         let midPercentText = "\(percents.map)%"
         let bottomPercentText = "\(percents.overall)%"
-        let topCopy = fileName.isEmpty ? "" : "  Bestand: \(fileName)"
-        top.stringValue = "Completed (\(topPercentText))\(etaPart)\(topCopy)"
+
+        let speedText = progressSpeedText.isEmpty ? "Snelheid: -" : "Snelheid: \(progressSpeedText)"
+        let etaText = progressEtaText.isEmpty ? "" : " | Resterend: \(progressEtaText)"
+        progressSpeed?.stringValue = "\(speedText)\(etaText)"
+
+        if fileName.isEmpty {
+            top.stringValue = "Bestand: wachten op rsync... (\(topPercentText))"
+        } else {
+            top.stringValue = "Bestand: \(fileName) (\(topPercentText))"
+        }
 
         let pathLine: String
         if !filePath.isEmpty {
@@ -1323,13 +1393,13 @@ class Controller: NSObject, NSWindowDelegate {
         } else {
             pathLine = "Doelpad: bezig met wachtrij... (\(midPercentText))"
         }
-        mid.stringValue = "\(pathLine)\(etaPart)"
+        mid.stringValue = pathLine
 
         let taskLine: String
         if progressTaskTotal > 0 {
-            taskLine = "Copying task \(progressTaskIndex) of \(progressTaskTotal) tasks"
+            taskLine = "Taak \(progressTaskIndex)/\(progressTaskTotal)"
         } else {
-            taskLine = "Copying task"
+            taskLine = "Taak"
         }
         let countPrefix: String
         if let done = progressFileDone, let total = progressFileTotal {
@@ -1340,11 +1410,11 @@ class Controller: NSObject, NSWindowDelegate {
             countPrefix = ""
         }
         if let overall = computeOverallFileProgress() {
-            bottom.stringValue = "\(countPrefix)\(taskLine) (\(bottomPercentText)) \(overall.done) of \(overall.total) files total\(etaPart)"
+            bottom.stringValue = "\(countPrefix)\(taskLine) (\(bottomPercentText)) | \(overall.done)/\(overall.total) bestanden totaal"
         } else if let done = progressFileDone, let total = progressFileTotal {
-            bottom.stringValue = "\(countPrefix)\(taskLine) (\(bottomPercentText)) \(done) of \(total) files\(etaPart)"
+            bottom.stringValue = "\(countPrefix)\(taskLine) (\(bottomPercentText)) | \(done)/\(total) bestanden"
         } else {
-            bottom.stringValue = "\(countPrefix)\(taskLine) (\(bottomPercentText))\(etaPart)"
+            bottom.stringValue = "\(countPrefix)\(taskLine) (\(bottomPercentText))"
         }
         updateProgressBars()
     }
@@ -1366,7 +1436,9 @@ class Controller: NSObject, NSWindowDelegate {
     func computeProgressPercents() -> (file: Int, map: Int, overall: Int) {
         let mapPct = max(0, min(100, progressPct))
         let filePct: Int
-        if let done = progressFileDone, let total = progressFileTotal, total > 0 {
+        if let currentFilePercent = progressCurrentFilePercent {
+            filePct = max(0, min(100, currentFilePercent))
+        } else if let done = progressFileDone, let total = progressFileTotal, total > 0 {
             filePct = Int(round(Double(done) / Double(total) * 100.0))
         } else {
             filePct = mapPct
@@ -2564,7 +2636,7 @@ class Controller: NSObject, NSWindowDelegate {
                 return (false, 130, "Geannuleerd door gebruiker", false)
             }
             let srcFull = "\(srcBase)/\(name)"
-            let flags = rsyncFlags(includeUpdate: true, includePartial: true, includeInplace: useInplace, includeProgress: true, includeXattrs: includeXattrs, outFormatMarker: rsyncOutFormatMarker)
+            let flags = rsyncFlags(includeUpdate: true, includePartial: true, includeInplace: useInplace, includeProgress: true, includePerFileProgress: true, includeXattrs: includeXattrs, outFormatMarker: rsyncOutFormatMarker)
             let cmd = "\(shellQuote(rsyncPath)) \(flags) \(shellQuote(srcFull)) \(shellQuote(dstBase))"
             let baseMode = useInplace ? "fallback --inplace" : "standaard"
             let mode = includeXattrs ? baseMode : "\(baseMode), zonder xattrs"
@@ -2619,7 +2691,8 @@ class Controller: NSObject, NSWindowDelegate {
                 outputData.append(data)
                 guard let chunk = String(data: data, encoding: .utf8) else { return }
                 lastOutputQueue.sync { lastOutput = Date() }
-                let lines = chunk.split(separator: "\n")
+                let normalizedChunk = chunk.replacingOccurrences(of: "\r", with: "\n")
+                let lines = normalizedChunk.split(separator: "\n")
                 for l in lines {
                     let trimmed = l.trimmingCharacters(in: .whitespaces)
                     if !trimmed.isEmpty {
@@ -2630,19 +2703,10 @@ class Controller: NSObject, NSWindowDelegate {
                         }
                         self.log("rsync: \(logLine)")
                     }
-                    self.updateSpeedEta(from: trimmed)
-                    if let pctRange = trimmed.range(of: #"([0-9]+)%"#, options: .regularExpression) {
-                        let pctStr = String(trimmed[pctRange]).replacingOccurrences(of: "%", with: "")
-                        var toChk: String?
-                        if let toChkRange = trimmed.range(of: #"to-chk=[^)]+"#, options: .regularExpression) {
-                            toChk = String(trimmed[toChkRange])
-                        }
-                        if let pctVal = Double(pctStr) {
-                            DispatchQueue.main.async {
-                                self.progressIndicator?.doubleValue = pctVal
-                                self.updateProgressFromRsync(percent: Int(pctVal), toChk: toChk)
-                            }
-                        }
+                    if let metrics = self.rsyncProgressMetrics(from: trimmed) {
+                        self.updateProgressMetrics(speed: metrics.speed, eta: metrics.eta)
+                        self.updateCurrentFileProgress(percent: metrics.percent)
+                        self.updateProgressFromRsync(toChk: metrics.toCheck)
                     } else if !trimmed.isEmpty {
                         self.updateCurrentFile(from: trimmed, srcBase: srcBase, dstBase: dstBase, taskName: name)
                     }

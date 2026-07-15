@@ -2,6 +2,17 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.6.3] - 2026-07-15
+
+### Gewijzigd
+
+- Overdrachtscherm opent smaller, ongeveer 70% van de eerdere breedte.
+- Overdrachtscherm is nu resizable.
+- Snelheid staat bovenaan het overdrachtscherm en wordt genormaliseerd naar `MB/s`.
+- Bovenste progressregel toont nu de progressie van het huidige bestand in plaats van de totale bestandstelling.
+- De rsync-copy gebruikt per-bestandprogress zodat de huidige bestandsbalk nauwkeuriger is.
+- ETA staat voortaan alleen op de bovenste snelheidsregel.
+
 ## [0.6.2] - 2026-07-01
 
 ### Opgelost
