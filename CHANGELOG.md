@@ -2,6 +2,15 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.7.3] - 2026-07-15
+
+### Opgelost
+
+- Hervatbare overdrachten worden nu direct bij de start opgeslagen.
+- De hervatbare opdracht wordt na elk afgerond, overgeslagen, mislukt of geannuleerd item bijgewerkt.
+- Na crash, force quit of herstart blijft `Hervat` daardoor staan met de laatst bekende resterende items.
+- Eerder mislukte items blijven behouden in de hervat-lijst wanneer later in dezelfde opdracht wordt geannuleerd.
+
 ## [0.7.2] - 2026-07-15
 
 ### Opgelost

@@ -545,6 +545,7 @@ class Controller: NSObject, NSWindowDelegate {
     let resumeJobDefaultsKey = "lastResumeJob"
     let recentSourceLimit = 5
     let favoritePresetLimit = 20
+    let resumeStateQueue = DispatchQueue(label: "MoveFolders.resumeState")
     let pendingCleanupStateQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.state")
     var pendingCleanupPaths: Set<String> = []
     let transferControlQueue = DispatchQueue(label: "MoveFolders.transferControl")
@@ -1805,16 +1806,56 @@ class Controller: NSObject, NSWindowDelegate {
         return try? JSONDecoder().decode(ResumableTransferJob.self, from: data)
     }
 
-    func storeResumeJob(_ job: ResumableTransferJob?) {
-        lastResumeJob = job
-        if let job = job, let data = try? JSONEncoder().encode(job) {
-            recentSourceDefaults.set(data, forKey: resumeJobDefaultsKey)
+    func uniqueResumeItems(_ items: [String]) -> [String] {
+        var seen = Set<String>()
+        var unique: [String] = []
+        for item in items {
+            guard !item.isEmpty, !seen.contains(item) else { continue }
+            seen.insert(item)
+            unique.append(item)
+        }
+        return unique
+    }
+
+    func makeResumeJob(srcPath: String, dstPath: String, items: [String], options: TransferOptions, reason: String, createdAt: Date) -> ResumableTransferJob? {
+        let unique = uniqueResumeItems(items)
+        guard !unique.isEmpty else { return nil }
+        return ResumableTransferJob(
+            srcPath: srcPath,
+            dstPath: dstPath,
+            items: unique,
+            options: options,
+            reason: reason,
+            createdAt: createdAt
+        )
+    }
+
+    func storeResumeJob(_ job: ResumableTransferJob?, logChange: Bool = true) {
+        resumeStateQueue.sync {
+            if let job = job, let data = try? JSONEncoder().encode(job) {
+                recentSourceDefaults.set(data, forKey: resumeJobDefaultsKey)
+            } else {
+                recentSourceDefaults.removeObject(forKey: resumeJobDefaultsKey)
+            }
+            recentSourceDefaults.synchronize()
+        }
+
+        let applyState = {
+            self.lastResumeJob = job
+            self.updateResumeButton()
+        }
+        if Thread.isMainThread {
+            applyState()
+        } else {
+            DispatchQueue.main.async(execute: applyState)
+        }
+
+        guard logChange else { return }
+        if let job = job {
             log("Hervatbare overdracht opgeslagen: \(job.items.joined(separator: ", "))")
         } else {
-            recentSourceDefaults.removeObject(forKey: resumeJobDefaultsKey)
             log("Geen hervatbare overdracht opgeslagen")
         }
-        updateResumeButton()
     }
 
     func updateResumeButton() {
@@ -3152,10 +3193,32 @@ class Controller: NSObject, NSWindowDelegate {
     func startTransfer(items: [String], srcPath: String, dstPath: String, resumed: Bool) {
         guard !items.isEmpty else { return }
         let optionsAtStart = currentTransferOptions()
+        let resumeCreatedAt = Date()
+        let activeResumeReason = resumed ? "Hervatte overdracht actief" : "Overdracht actief"
+        func remainingItems(from index: Int) -> [String] {
+            guard index < items.count else { return [] }
+            return Array(items[index..<items.count])
+        }
+        func remainingItems(after index: Int) -> [String] {
+            remainingItems(from: index + 1)
+        }
+        func persistResumeSnapshot(_ snapshotItems: [String], reason: String, logChange: Bool = false) {
+            let job = makeResumeJob(
+                srcPath: srcPath,
+                dstPath: dstPath,
+                items: snapshotItems,
+                options: optionsAtStart,
+                reason: reason,
+                createdAt: resumeCreatedAt
+            )
+            storeResumeJob(job, logChange: logChange)
+        }
+
         rememberRecentSource(srcPath)
         rememberRecentDestination(dstPath)
         resetTransferCancellation()
         resetXattrRuntimeChoices()
+        persistResumeSnapshot(items, reason: activeResumeReason, logChange: true)
         let summary = items.prefix(3).joined(separator: ", ") + (items.count > 3 ? " … (+\(items.count - 3) meer)" : "")
         log("\(resumed ? "Hervat copy" : "Start copy"): \(items.joined(separator: ", "))")
         log("Instelling lege mappen overslaan: \(skipEmptyFoldersEnabled ? "aan" : "uit")")
@@ -3179,6 +3242,9 @@ class Controller: NSObject, NSWindowDelegate {
                 for (idx, name) in items.enumerated() {
                     if self.isTransferCancelRequested() {
                         didCancel = true
+                        resumeItems = items
+                        resumeReason = "Geannuleerd tijdens pre-scan"
+                        persistResumeSnapshot(resumeItems, reason: resumeReason, logChange: true)
                         break
                     }
                     DispatchQueue.main.async { self.setPhase("Pre-scan \(idx + 1)/\(items.count): \(name)") }
@@ -3189,6 +3255,9 @@ class Controller: NSObject, NSWindowDelegate {
                     }
                     if self.isTransferCancelRequested() {
                         didCancel = true
+                        resumeItems = items
+                        resumeReason = "Geannuleerd tijdens pre-scan"
+                        persistResumeSnapshot(resumeItems, reason: resumeReason, logChange: true)
                         break
                     }
                     preScannedFileCounts[name] = total
@@ -3205,8 +3274,9 @@ class Controller: NSObject, NSWindowDelegate {
             transferLoop: for (idx, name) in items.enumerated() {
                 if self.isTransferCancelRequested() {
                     didCancel = true
-                    resumeItems = Array(items[idx..<items.count])
+                    resumeItems = self.uniqueResumeItems(resumeItems + remainingItems(from: idx))
                     resumeReason = "Geannuleerd voor \(name)"
+                    persistResumeSnapshot(resumeItems, reason: resumeReason, logChange: true)
                     break
                 }
                 // Controleer lege bronmappen voordat de doelmap wordt beoordeeld.
@@ -3224,13 +3294,15 @@ class Controller: NSObject, NSWindowDelegate {
                     }
                     if self.isTransferCancelRequested() {
                         didCancel = true
-                        resumeItems = Array(items[idx..<items.count])
+                        resumeItems = self.uniqueResumeItems(resumeItems + remainingItems(from: idx))
                         resumeReason = "Geannuleerd tijdens lege-mapcontrole"
+                        persistResumeSnapshot(resumeItems, reason: resumeReason, logChange: true)
                         break
                     }
                     if !hasFiles {
                         self.log("Lege map overgeslagen: \(name)")
                         summaries.append(TransferSummary(name: name, status: .warning("Overgeslagen: lege map")))
+                        persistResumeSnapshot(self.uniqueResumeItems(resumeItems + remainingItems(after: idx)), reason: activeResumeReason)
                         DispatchQueue.main.async {
                             self.progressDetail?.stringValue = "Overgeslagen: lege map \(name)"
                             self.refreshSrc()
@@ -3252,6 +3324,11 @@ class Controller: NSObject, NSWindowDelegate {
                 }
                 self.log("Doelstatus \(name): \(statusText)")
                 if dstStatus == .notDirectory {
+                    let msg = "Doelpad bestaat al als bestand"
+                    summaries.append(TransferSummary(name: name, status: .failed(msg)))
+                    resumeItems.append(name)
+                    if resumeReason.isEmpty { resumeReason = msg }
+                    persistResumeSnapshot(self.uniqueResumeItems(resumeItems + remainingItems(after: idx)), reason: resumeReason)
                     DispatchQueue.main.async {
                         self.alert("Doelpad bestaat al als bestand:\n\(dstItem)\nKies een andere doelmap.")
                     }
@@ -3286,6 +3363,7 @@ class Controller: NSObject, NSWindowDelegate {
                     summaries.append(TransferSummary(name: name, status: .failed(msg)))
                     resumeItems.append(name)
                     if resumeReason.isEmpty { resumeReason = "Kopie mislukt" }
+                    persistResumeSnapshot(self.uniqueResumeItems(resumeItems + remainingItems(after: idx)), reason: resumeReason)
                     DispatchQueue.main.async {
                         self.refreshDst()
                         self.refreshSrc()
@@ -3296,6 +3374,7 @@ class Controller: NSObject, NSWindowDelegate {
                     summaries.append(TransferSummary(name: name, status: .warning(msg)))
                     resumeItems.append(name)
                     if resumeReason.isEmpty { resumeReason = "Kopie met waarschuwing" }
+                    persistResumeSnapshot(self.uniqueResumeItems(resumeItems + remainingItems(after: idx)), reason: resumeReason)
                     DispatchQueue.main.async {
                         self.refreshDst()
                         self.refreshSrc()
@@ -3304,8 +3383,9 @@ class Controller: NSObject, NSWindowDelegate {
                 case .cancelled:
                     self.log("Kopie geannuleerd: \(name)")
                     didCancel = true
-                    resumeItems.append(contentsOf: Array(items[idx..<items.count]))
+                    resumeItems = self.uniqueResumeItems(resumeItems + remainingItems(from: idx))
                     resumeReason = "Geannuleerd tijdens kopiëren"
+                    persistResumeSnapshot(resumeItems, reason: resumeReason, logChange: true)
                     break transferLoop
                 case .success:
                     break
@@ -3313,8 +3393,9 @@ class Controller: NSObject, NSWindowDelegate {
 
                 if self.isTransferCancelRequested() {
                     didCancel = true
-                    resumeItems.append(contentsOf: Array(items[idx..<items.count]))
+                    resumeItems = self.uniqueResumeItems(resumeItems + remainingItems(from: idx))
                     resumeReason = "Geannuleerd na kopiëren"
+                    persistResumeSnapshot(resumeItems, reason: resumeReason, logChange: true)
                     break
                 }
                 // Post-verify + opschonen per map
@@ -3325,6 +3406,7 @@ class Controller: NSObject, NSWindowDelegate {
                     resumeItems.append(name)
                     if resumeReason.isEmpty { resumeReason = msg }
                 }
+                persistResumeSnapshot(self.uniqueResumeItems(resumeItems + remainingItems(after: idx)), reason: resumeReason.isEmpty ? activeResumeReason : resumeReason)
                 DispatchQueue.main.async {
                     self.refreshDst()
                     self.refreshSrc()
@@ -3333,13 +3415,7 @@ class Controller: NSObject, NSWindowDelegate {
             if didCancel {
                 summaries.append(TransferSummary(name: "Overdracht", status: .warning("Geannuleerd door gebruiker")))
             }
-            var uniqueResumeItems: [String] = []
-            var seenResumeItems = Set<String>()
-            for item in resumeItems {
-                guard !seenResumeItems.contains(item) else { continue }
-                seenResumeItems.insert(item)
-                uniqueResumeItems.append(item)
-            }
+            let uniqueResumeItems = self.uniqueResumeItems(resumeItems)
             DispatchQueue.main.async {
                 if uniqueResumeItems.isEmpty {
                     self.storeResumeJob(nil)
