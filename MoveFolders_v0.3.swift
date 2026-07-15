@@ -817,16 +817,19 @@ class Controller: NSObject, NSWindowDelegate {
         updateResumeButton()
         layoutMainWindow()
 
-        refreshSrc()
-        refreshDst()
-
         window.makeKeyAndOrderFront(nil)
         setupDebugWindow()
-        showDebugWindow()
         log("App gestart")
-        schedulePendingDeleteCleanup(basePath: srcField.stringValue)
-        setAppIcon()
         app.activate(ignoringOtherApps: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.refreshSrc()
+            self.refreshDst()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            self.schedulePendingDeleteCleanup(basePath: self.srcField.stringValue)
+        }
+
         app.run()
     }
 
@@ -1142,6 +1145,13 @@ class Controller: NSObject, NSWindowDelegate {
             self.srcTable.isEnabled = false
             self.srcTable.reloadData()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            guard self.srcListToken == token, self.srcTable.isEnabled == false else { return }
+            self.srcAdapter.items = [TableAdapter.Item(name: "Volume reageert traag...", isDir: false, modDate: Date())]
+            self.srcTable.isEnabled = true
+            self.srcTable.reloadData()
+            self.log("Bronlijst reageert traag: \(path)")
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let names = self.listNames(path)
             let fastSort = sortIndex <= 1 ? sortIndex : 0
@@ -1151,8 +1161,8 @@ class Controller: NSObject, NSWindowDelegate {
                 self.applyListUpdate(fastItems, to: self.srcTable, adapter: self.srcAdapter)
                 self.srcTable.isEnabled = true
             }
-            guard !names.isEmpty else { return }
             let withDates = sortIndex >= 2
+            guard !names.isEmpty, withDates else { return }
             let metaItems = self.sortItems(self.buildMetadataItems(names, base: path, includeDates: withDates), sort: sortIndex)
             DispatchQueue.main.async {
                 guard self.srcListToken == token else { return }
@@ -1170,6 +1180,13 @@ class Controller: NSObject, NSWindowDelegate {
             self.dstTable.isEnabled = false
             self.dstTable.reloadData()
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            guard self.dstListToken == token, self.dstTable.isEnabled == false else { return }
+            self.dstAdapter.items = [TableAdapter.Item(name: "Volume reageert traag...", isDir: false, modDate: Date())]
+            self.dstTable.isEnabled = true
+            self.dstTable.reloadData()
+            self.log("Doellijst reageert traag: \(path)")
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let names = self.listNames(path)
             let fastSort = sortIndex <= 1 ? sortIndex : 0
@@ -1179,8 +1196,8 @@ class Controller: NSObject, NSWindowDelegate {
                 self.applyListUpdate(fastItems, to: self.dstTable, adapter: self.dstAdapter)
                 self.dstTable.isEnabled = true
             }
-            guard !names.isEmpty else { return }
             let withDates = sortIndex >= 2
+            guard !names.isEmpty, withDates else { return }
             let metaItems = self.sortItems(self.buildMetadataItems(names, base: path, includeDates: withDates), sort: sortIndex)
             DispatchQueue.main.async {
                 guard self.dstListToken == token else { return }

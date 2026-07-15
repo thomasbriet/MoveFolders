@@ -2,6 +2,15 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.7.2] - 2026-07-15
+
+### Opgelost
+
+- App opent nu eerst het hoofdvenster voordat bron- en doelvolumes worden geladen.
+- Debugvenster opent niet meer automatisch bij het starten van de app.
+- Naam-sortering start geen onnodige metadata-scan meer op netwerkvolumes.
+- Bron- en doellijsten tonen na 8 seconden een melding wanneer een volume traag reageert, zodat de app niet vast lijkt te lopen.
+
 ## [0.7.1] - 2026-07-15
 
 ### Gewijzigd
