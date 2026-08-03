@@ -2,21 +2,21 @@
 
 MoveFolders is een macOS AppKit tool om projectmappen tussen volumes/netwerkschijven over te zetten met rsync, post-verify, mismatch-afhandeling en optionele bronverwijdering.
 
-De app onthoudt de 5 laatst gebruikte bron- en doelpaden, ondersteunt favorieten voor bron/doel/opties, kan mislukte of geannuleerde overdrachten hervatten, en ondersteunt eenrichtings-syncprofielen zolang de app draait. Lege geselecteerde bronmappen kunnen standaard automatisch worden overgeslagen.
+De app onthoudt de 5 laatst gebruikte bron- en doelpaden, ondersteunt favorieten voor bron/doel/opties, kan mislukte of geannuleerde overdrachten hervatten, en ondersteunt meerdere eenrichtings-syncprofielen zolang de app draait. Lege geselecteerde bronmappen kunnen standaard automatisch worden overgeslagen.
 
 Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.8.3
+./scripts/build_release.sh 0.8.4
 ```
 
 Dit maakt lokaal:
 
 - `MoveFolders.app`
-- `MoveFolders_v0.8.3_share.zip`
-- `MoveFolders_v0.8.3_installer.pkg`
+- `MoveFolders_v0.8.4_share.zip`
+- `MoveFolders_v0.8.4_installer.pkg`
 
 ## Updates
 

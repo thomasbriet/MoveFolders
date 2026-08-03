@@ -489,6 +489,7 @@ class Controller: NSObject, NSWindowDelegate {
     var resumeButton: NSButton!
     var saveFavoriteButton: NSButton!
     var syncProfilePopup: NSPopUpButton!
+    var newSyncProfileButton: NSButton!
     var saveSyncProfileButton: NSButton!
     var toggleSyncProfileButton: NSButton!
     var runSyncProfileButton: NSButton!
@@ -566,10 +567,7 @@ class Controller: NSObject, NSWindowDelegate {
     var syncRunningProfileIds: Set<String> = []
     var syncTimer: DispatchSourceTimer?
     var selectedSyncProfileId: String?
-    var activeSyncProgressProfileId: String?
-    var syncProgressPercent: Int = 0
-    var syncProgressSpeedText: String = ""
-    var syncProgressEtaText: String = ""
+    var syncProgressStates: [String: SyncProgressState] = [:]
     var srcListToken: Int = 0
     var dstListToken: Int = 0
     let recentSourceDefaults = UserDefaults(suiteName: "com.thomasbriet.MoveFolders") ?? UserDefaults.standard
@@ -660,6 +658,16 @@ class Controller: NSObject, NSWindowDelegate {
         var lastStatus: String
         var consecutiveFailures: Int
         var updatedAt: Date
+    }
+
+    struct SyncProgressState {
+        var percent: Int
+        var speed: String
+        var eta: String
+        var detail: String
+        var status: String
+        var isRunning: Bool
+        var succeeded: Bool?
     }
 
     func setAppIcon() {
@@ -887,9 +895,10 @@ class Controller: NSObject, NSWindowDelegate {
         applyDstButton = makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
         backDstButton = makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
         syncProfilePopup = makePopup(20, 480, 220, #selector(selectSyncProfile), in: syncContent)
-        saveSyncProfileButton = makeButton("Bewaar sync", 250, 477, 110, 28, #selector(saveCurrentSyncProfile), in: syncContent)
-        toggleSyncProfileButton = makeButton("Sync aan/uit", 370, 477, 110, 28, #selector(toggleSelectedSyncProfile), in: syncContent)
-        runSyncProfileButton = makeButton("Sync nu", 490, 477, 90, 28, #selector(runSelectedSyncProfileNow), in: syncContent)
+        newSyncProfileButton = makeButton("Nieuw profiel", 250, 477, 105, 28, #selector(createNewSyncProfile), in: syncContent)
+        saveSyncProfileButton = makeButton("Bewaar sync", 365, 477, 110, 28, #selector(saveCurrentSyncProfile), in: syncContent)
+        toggleSyncProfileButton = makeButton("Sync aan/uit", 485, 477, 110, 28, #selector(toggleSelectedSyncProfile), in: syncContent)
+        runSyncProfileButton = makeButton("Sync nu", 605, 477, 90, 28, #selector(runSelectedSyncProfileNow), in: syncContent)
         syncNameLabel = makeLabel("Naam:", 20, 430, in: syncContent)
         syncNameField = makeTextField(120, 426, 420, "Nieuwe sync", in: syncContent)
         syncSrcLabel = makeLabel("Folder A:", 20, 390, in: syncContent)
@@ -942,6 +951,7 @@ class Controller: NSObject, NSWindowDelegate {
             applySyncProfileToFields(profile)
         }
         refreshSyncProfileMenu()
+        renderSyncProgress(for: selectedSyncProfile())
         updateResumeButton()
         layoutMainWindow()
 
@@ -1072,9 +1082,10 @@ class Controller: NSObject, NSWindowDelegate {
 
         let topY = height - 52
         syncProfilePopup.frame = NSRect(x: margin, y: topY + 3, width: 240, height: 26)
-        saveSyncProfileButton.frame = NSRect(x: 275, y: topY, width: 110, height: 28)
-        toggleSyncProfileButton.frame = NSRect(x: 395, y: topY, width: 115, height: 28)
-        runSyncProfileButton.frame = NSRect(x: 520, y: topY, width: 90, height: 28)
+        newSyncProfileButton.frame = NSRect(x: 275, y: topY, width: 105, height: 28)
+        saveSyncProfileButton.frame = NSRect(x: 390, y: topY, width: 110, height: 28)
+        toggleSyncProfileButton.frame = NSRect(x: 510, y: topY, width: 115, height: 28)
+        runSyncProfileButton.frame = NSRect(x: 635, y: topY, width: 90, height: 28)
 
         let fieldX = margin + labelW + 10
         let fieldRightInset: CGFloat = 58
@@ -1230,7 +1241,25 @@ class Controller: NSObject, NSWindowDelegate {
         applySyncProfileToFields(profile)
         refreshSyncProfileMenu()
         updateSyncStatusLabel(profile: profile)
+        renderSyncProgress(for: profile)
         log("Sync-profiel geselecteerd: \(profile.name)")
+    }
+
+    @objc func createNewSyncProfile() {
+        selectedSyncProfileId = nil
+        syncNameField.stringValue = "Nieuwe sync"
+        syncSrcField.stringValue = defaultServer
+        syncDstField.stringValue = defaultLocal
+        syncIntervalField.stringValue = "15"
+        syncEnabledCheckbox.state = .on
+        syncDeleteExtraCheckbox.state = .off
+        syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
+        refreshSyncProfileMenu()
+        updateSyncStatusLabel(profile: nil)
+        renderSyncProgress(for: nil)
+        window.makeFirstResponder(syncNameField)
+        syncNameField.selectText(nil)
+        log("Nieuw sync-profiel gestart")
     }
 
     @objc func saveCurrentSyncProfile() {
@@ -2115,7 +2144,8 @@ class Controller: NSObject, NSWindowDelegate {
         guard syncProfilePopup != nil else { return }
         syncProfilePopup.removeAllItems()
         let selectedName = selectedSyncProfile()?.name
-        syncProfilePopup.addItem(withTitle: selectedName.map { "Sync: \($0)" } ?? "Sync-profielen")
+        let popupTitle = selectedName.map { "Sync: \($0)" } ?? (syncProfiles.isEmpty ? "Sync-profielen" : "Nieuw sync-profiel")
+        syncProfilePopup.addItem(withTitle: popupTitle)
         syncProfilePopup.item(at: 0)?.isEnabled = false
 
         if syncProfiles.isEmpty {
@@ -2125,13 +2155,16 @@ class Controller: NSObject, NSWindowDelegate {
             runSyncProfileButton?.isEnabled = false
             toggleSyncProfileButton?.isEnabled = false
             syncProfilePopup.selectItem(at: 0)
+            saveSyncProfileButton?.title = "Bewaar sync"
             updateSyncStatusLabel(profile: nil)
+            renderSyncProgress(for: nil)
             return
         }
 
+        let runningIds = syncStateQueue.sync { syncRunningProfileIds }
         syncProfilePopup.menu?.addItem(NSMenuItem.separator())
         for profile in syncProfiles {
-            let prefix = profile.enabled ? "Aan" : "Uit"
+            let prefix = runningIds.contains(profile.id) ? "Bezig" : (profile.enabled ? "Aan" : "Uit")
             syncProfilePopup.addItem(withTitle: "\(prefix): \(profile.name)")
             syncProfilePopup.lastItem?.representedObject = profile.id
             syncProfilePopup.lastItem?.toolTip = "\(profile.srcPath) -> \(profile.dstPath)"
@@ -2139,6 +2172,7 @@ class Controller: NSObject, NSWindowDelegate {
         syncProfilePopup.isEnabled = true
         runSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
         toggleSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
+        saveSyncProfileButton?.title = selectedSyncProfileId == nil ? "Maak sync" : "Bewaar sync"
         syncProfilePopup.selectItem(at: 0)
     }
 
@@ -2208,17 +2242,22 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func markSyncProfileRunning(_ id: String) -> Bool {
-        syncStateQueue.sync {
+        let started = syncStateQueue.sync {
             if syncRunningProfileIds.contains(id) { return false }
             syncRunningProfileIds.insert(id)
             return true
         }
+        if started {
+            DispatchQueue.main.async { self.refreshSyncProfileMenu() }
+        }
+        return started
     }
 
     func unmarkSyncProfileRunning(_ id: String) {
         _ = syncStateQueue.sync {
             syncRunningProfileIds.remove(id)
         }
+        DispatchQueue.main.async { self.refreshSyncProfileMenu() }
     }
 
     func updateSyncProfile(id: String, _ mutate: @escaping (inout SyncProfile) -> Void) {
@@ -2235,49 +2274,96 @@ class Controller: NSObject, NSWindowDelegate {
 
     func resetSyncProgress(profile: SyncProfile) {
         DispatchQueue.main.async {
-            self.activeSyncProgressProfileId = profile.id
-            self.syncProgressPercent = 0
-            self.syncProgressSpeedText = ""
-            self.syncProgressEtaText = ""
-            self.syncProgressTitleLabel?.stringValue = "Voortgang: \(profile.name) bezig..."
-            self.syncProgressDetailLabel?.stringValue = "Bestand: voorbereiden..."
-            self.syncProgressSpeedLabel?.stringValue = "Snelheid: - | ETA: -"
-            self.syncProgressBar?.isIndeterminate = false
-            self.syncProgressBar?.doubleValue = 0
+            self.syncProgressStates[profile.id] = SyncProgressState(
+                percent: 0,
+                speed: "",
+                eta: "",
+                detail: "voorbereiden...",
+                status: "Bezig...",
+                isRunning: true,
+                succeeded: nil
+            )
+            if self.selectedSyncProfileId == profile.id {
+                self.renderSyncProgress(for: profile)
+            }
         }
     }
 
     func updateSyncProgress(profileId: String, percent: Int? = nil, speed: String? = nil, eta: String? = nil, detail: String? = nil) {
         DispatchQueue.main.async {
-            guard self.activeSyncProgressProfileId == profileId else { return }
+            guard var state = self.syncProgressStates[profileId], state.isRunning else { return }
             if let percent = percent {
-                self.syncProgressPercent = max(0, min(100, percent))
-                self.syncProgressBar?.doubleValue = Double(self.syncProgressPercent)
+                state.percent = max(0, min(100, percent))
             }
-            if let speed = speed { self.syncProgressSpeedText = speed }
-            if let eta = eta { self.syncProgressEtaText = eta }
+            if let speed = speed { state.speed = speed }
+            if let eta = eta { state.eta = eta }
             if let detail = detail, !detail.isEmpty {
-                self.syncProgressDetailLabel?.stringValue = "Bestand: \(detail)"
+                state.detail = detail
             }
-            let speedText = self.syncProgressSpeedText.isEmpty ? "-" : self.syncProgressSpeedText
-            let etaText = self.syncProgressEtaText.isEmpty ? "-" : self.syncProgressEtaText
-            self.syncProgressSpeedLabel?.stringValue = "Snelheid: \(speedText) | ETA: \(etaText)"
-            let profileName = self.syncProfiles.first(where: { $0.id == profileId })?.name ?? "sync"
-            self.syncProgressTitleLabel?.stringValue = "Voortgang: \(profileName) (\(self.syncProgressPercent)%)"
+            self.syncProgressStates[profileId] = state
+            if self.selectedSyncProfileId == profileId {
+                self.renderSyncProgress(for: self.selectedSyncProfile())
+            }
         }
     }
 
     func finishSyncProgress(profileId: String, profileName: String, status: String, success: Bool) {
         DispatchQueue.main.async {
-            guard self.activeSyncProgressProfileId == profileId else { return }
-            self.syncProgressPercent = success ? 100 : self.syncProgressPercent
-            self.syncProgressBar?.doubleValue = Double(self.syncProgressPercent)
-            self.syncProgressTitleLabel?.stringValue = "Voortgang: \(profileName) \(success ? "klaar" : "gestopt")"
-            self.syncProgressDetailLabel?.stringValue = status
-            if success {
-                self.syncProgressSpeedLabel?.stringValue = "Snelheid: - | ETA: 0:00:00"
+            var state = self.syncProgressStates[profileId] ?? SyncProgressState(
+                percent: 0,
+                speed: "",
+                eta: "",
+                detail: "",
+                status: status,
+                isRunning: false,
+                succeeded: success
+            )
+            if success { state.percent = 100 }
+            state.status = status
+            state.isRunning = false
+            state.succeeded = success
+            if success { state.eta = "0:00:00" }
+            self.syncProgressStates[profileId] = state
+            if self.selectedSyncProfileId == profileId {
+                let profile = self.syncProfiles.first(where: { $0.id == profileId })
+                self.renderSyncProgress(for: profile)
             }
         }
+    }
+
+    func renderSyncProgress(for profile: SyncProfile?) {
+        guard syncProgressTitleLabel != nil else { return }
+        guard let profile = profile else {
+            syncProgressTitleLabel.stringValue = "Voortgang: selecteer of maak een sync-profiel"
+            syncProgressDetailLabel.stringValue = "Bestand: -"
+            syncProgressSpeedLabel.stringValue = "Snelheid: - | ETA: -"
+            syncProgressBar.isIndeterminate = false
+            syncProgressBar.doubleValue = 0
+            return
+        }
+
+        guard let state = syncProgressStates[profile.id] else {
+            syncProgressTitleLabel.stringValue = "Voortgang: \(profile.name) niet actief"
+            syncProgressDetailLabel.stringValue = "Laatste resultaat: \(profile.lastStatus)"
+            syncProgressSpeedLabel.stringValue = "Snelheid: - | ETA: -"
+            syncProgressBar.isIndeterminate = false
+            syncProgressBar.doubleValue = 0
+            return
+        }
+
+        let stateText: String
+        if state.isRunning {
+            stateText = "\(state.percent)%"
+        } else {
+            stateText = state.succeeded == true ? "klaar" : "gestopt"
+        }
+        syncProgressTitleLabel.stringValue = "Voortgang: \(profile.name) (\(stateText))"
+        syncProgressDetailLabel.stringValue = state.isRunning ? "Bestand: \(state.detail)" : state.status
+        let speedText = state.speed.isEmpty ? "-" : state.speed
+        let etaText = state.eta.isEmpty ? "-" : state.eta
+        syncProgressSpeedLabel.stringValue = "Snelheid: \(speedText) | ETA: \(etaText)"
+        syncProgressBar.isIndeterminate = false
+        syncProgressBar.doubleValue = Double(state.percent)
     }
 
     func syncProgressDetail(fromRsyncLine line: String) -> String? {

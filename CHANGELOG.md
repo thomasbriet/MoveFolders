@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.4] - 2026-08-03
+
+### Toegevoegd
+
+- Met `Nieuw profiel` kunnen meerdere afzonderlijke sync-profielen worden aangemaakt.
+- De profielkeuzelijst toont per profiel of het aan, uit of bezig is.
+- De voortgang wordt per sync-profiel bijgehouden; door een ander profiel te selecteren wisselt ook de zichtbare voortgang.
+
+### Gewijzigd
+
+- Sync-profielen kunnen tijdens andere actieve syncs geselecteerd en aangepast worden. Opgeslagen wijzigingen gelden vanaf de volgende run van het aangepaste profiel.
+
 ## [0.8.3] - 2026-08-03
 
 ### Opgelost
