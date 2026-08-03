@@ -463,6 +463,9 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     var window: NSWindow!
+    var tabView: NSTabView!
+    var moveTabContent: NSView!
+    var syncTabContent: NSView!
     var srcTable: NSTableView!
     var dstTable: NSTableView!
     var srcAdapter = TableAdapter()
@@ -490,6 +493,19 @@ class Controller: NSObject, NSWindowDelegate {
     var toggleSyncProfileButton: NSButton!
     var runSyncProfileButton: NSButton!
     var syncStatusLabel: NSTextField!
+    var syncNameLabel: NSTextField!
+    var syncSrcLabel: NSTextField!
+    var syncDstLabel: NSTextField!
+    var syncIntervalLabel: NSTextField!
+    var syncNameField: NSTextField!
+    var syncSrcField: NSTextField!
+    var syncDstField: NSTextField!
+    var syncIntervalField: NSTextField!
+    var syncEnabledCheckbox: NSButton!
+    var syncDeleteExtraCheckbox: NSButton!
+    var syncXattrsCheckbox: NSButton!
+    var chooseSyncSrcButton: NSButton!
+    var chooseSyncDstButton: NSButton!
     var chooseSrcButton: NSButton!
     var swapPathsButton: NSButton!
     var chooseDstButton: NSButton!
@@ -698,36 +714,55 @@ class Controller: NSObject, NSWindowDelegate {
         window.center()
         window.title = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String) ?? "MoveFolders"
 
-        let content = window.contentView!
+        let rootContent = window.contentView!
+        tabView = NSTabView(frame: rootContent.bounds)
+        tabView.autoresizingMask = [.width, .height]
+        rootContent.addSubview(tabView)
 
-        func makeLabel(_ text: String, _ x: CGFloat, _ y: CGFloat) -> NSTextField {
+        moveTabContent = NSView(frame: tabView.bounds)
+        syncTabContent = NSView(frame: tabView.bounds)
+
+        let moveItem = NSTabViewItem(identifier: "move")
+        moveItem.label = "Move folders"
+        moveItem.view = moveTabContent
+        tabView.addTabViewItem(moveItem)
+
+        let syncItem = NSTabViewItem(identifier: "sync")
+        syncItem.label = "Sync folders"
+        syncItem.view = syncTabContent
+        tabView.addTabViewItem(syncItem)
+
+        let content = moveTabContent!
+        let syncContent = syncTabContent!
+
+        func makeLabel(_ text: String, _ x: CGFloat, _ y: CGFloat, in parent: NSView = content) -> NSTextField {
             let lbl = NSTextField(labelWithString: text)
             lbl.frame = NSRect(x: x, y: y, width: 60, height: 20)
             lbl.autoresizingMask = []
-            content.addSubview(lbl)
+            parent.addSubview(lbl)
             return lbl
         }
 
-        func makeTextField(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ val: String) -> NSTextField {
+        func makeTextField(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ val: String, in parent: NSView = content) -> NSTextField {
             let tf = NSTextField(frame: NSRect(x: x, y: y, width: w, height: 24))
             tf.stringValue = val
             tf.autoresizingMask = []
-            content.addSubview(tf)
+            parent.addSubview(tf)
             return tf
         }
 
-        func makeButton(_ title: String, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSButton {
+        func makeButton(_ title: String, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin], in parent: NSView = content) -> NSButton {
             let btn = NSButton(frame: NSRect(x: x, y: y, width: w, height: h))
             btn.title = title
             btn.bezelStyle = .rounded
             btn.target = self
             btn.action = action
             btn.autoresizingMask = []
-            content.addSubview(btn)
+            parent.addSubview(btn)
             return btn
         }
 
-        func makeImageButton(_ imageName: NSImage.Name, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin]) -> NSButton {
+        func makeImageButton(_ imageName: NSImage.Name, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, _ action: Selector, mask: NSView.AutoresizingMask = [.minYMargin], in parent: NSView = content) -> NSButton {
             let btn = NSButton(frame: NSRect(x: x, y: y, width: size, height: size))
             btn.bezelStyle = .texturedRounded
             btn.image = NSImage(named: imageName)
@@ -736,20 +771,20 @@ class Controller: NSObject, NSWindowDelegate {
             btn.target = self
             btn.action = action
             btn.autoresizingMask = []
-            content.addSubview(btn)
+            parent.addSubview(btn)
             return btn
         }
 
-        func makePopup(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ action: Selector) -> NSPopUpButton {
+        func makePopup(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ action: Selector, in parent: NSView = content) -> NSPopUpButton {
             let pop = NSPopUpButton(frame: NSRect(x: x, y: y, width: w, height: 26), pullsDown: true)
             pop.target = self
             pop.action = action
             pop.autoresizingMask = []
-            content.addSubview(pop)
+            parent.addSubview(pop)
             return pop
         }
 
-        func makeTable(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> NSTableView {
+        func makeTable(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, in parent: NSView = content) -> NSTableView {
             let scroll = NSScrollView(frame: NSRect(x: x, y: y, width: w, height: h))
             scroll.hasVerticalScroller = true
             scroll.autoresizingMask = []
@@ -767,7 +802,7 @@ class Controller: NSObject, NSWindowDelegate {
             table.allowsEmptySelection = true
             table.headerView = nil
             scroll.documentView = table
-            content.addSubview(scroll)
+            parent.addSubview(scroll)
             return table
         }
 
@@ -843,14 +878,40 @@ class Controller: NSObject, NSWindowDelegate {
         backSrcButton = makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
         applyDstButton = makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
         backDstButton = makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
-        syncProfilePopup = makePopup(20, 48, 220, #selector(selectSyncProfile))
-        saveSyncProfileButton = makeButton("Bewaar sync", 250, 45, 110, 28, #selector(saveCurrentSyncProfile))
-        toggleSyncProfileButton = makeButton("Sync aan/uit", 370, 45, 110, 28, #selector(toggleSelectedSyncProfile))
-        runSyncProfileButton = makeButton("Sync nu", 490, 45, 90, 28, #selector(runSelectedSyncProfileNow))
+        syncProfilePopup = makePopup(20, 480, 220, #selector(selectSyncProfile), in: syncContent)
+        saveSyncProfileButton = makeButton("Bewaar sync", 250, 477, 110, 28, #selector(saveCurrentSyncProfile), in: syncContent)
+        toggleSyncProfileButton = makeButton("Sync aan/uit", 370, 477, 110, 28, #selector(toggleSelectedSyncProfile), in: syncContent)
+        runSyncProfileButton = makeButton("Sync nu", 490, 477, 90, 28, #selector(runSelectedSyncProfileNow), in: syncContent)
+        syncNameLabel = makeLabel("Naam:", 20, 430, in: syncContent)
+        syncNameField = makeTextField(120, 426, 420, "Nieuwe sync", in: syncContent)
+        syncSrcLabel = makeLabel("Folder A:", 20, 390, in: syncContent)
+        syncSrcField = makeTextField(120, 386, 760, defaultServer, in: syncContent)
+        chooseSyncSrcButton = makeImageButton(NSImage.folderName, 890, 384, 28, #selector(chooseSyncSrc), in: syncContent)
+        syncDstLabel = makeLabel("Folder B:", 20, 350, in: syncContent)
+        syncDstField = makeTextField(120, 346, 760, defaultLocal, in: syncContent)
+        chooseSyncDstButton = makeImageButton(NSImage.folderName, 890, 344, 28, #selector(chooseSyncDst), in: syncContent)
+        syncIntervalLabel = makeLabel("Interval:", 20, 305, in: syncContent)
+        syncIntervalField = makeTextField(120, 301, 90, "15", in: syncContent)
+        syncEnabledCheckbox = NSButton(checkboxWithTitle: "Automatisch syncen", target: nil, action: nil)
+        syncEnabledCheckbox.state = .on
+        syncEnabledCheckbox.autoresizingMask = []
+        syncContent.addSubview(syncEnabledCheckbox)
+        syncDeleteExtraCheckbox = NSButton(checkboxWithTitle: "Extra bestanden op doel verwijderen", target: nil, action: nil)
+        syncDeleteExtraCheckbox.state = .off
+        syncDeleteExtraCheckbox.autoresizingMask = []
+        syncContent.addSubview(syncDeleteExtraCheckbox)
+        syncXattrsCheckbox = NSButton(checkboxWithTitle: "Bestandsattributen (xattrs) kopiëren", target: nil, action: nil)
+        syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
+        syncXattrsCheckbox.autoresizingMask = []
+        syncContent.addSubview(syncXattrsCheckbox)
         syncStatusLabel = NSTextField(labelWithString: "Sync: geen profiel")
         syncStatusLabel.lineBreakMode = .byTruncatingMiddle
         syncStatusLabel.autoresizingMask = []
-        content.addSubview(syncStatusLabel)
+        syncContent.addSubview(syncStatusLabel)
+        selectedSyncProfileId = syncProfiles.first?.id
+        if let profile = selectedSyncProfile() {
+            applySyncProfileToFields(profile)
+        }
         refreshSyncProfileMenu()
         updateResumeButton()
         layoutMainWindow()
@@ -877,14 +938,23 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func layoutMainWindow() {
-        guard let content = window?.contentView,
+        guard let rootContent = window?.contentView,
+              tabView != nil,
+              moveTabContent != nil,
+              syncTabContent != nil,
               srcField != nil,
               dstField != nil,
               srcTable != nil,
               dstTable != nil,
-              syncProfilePopup != nil else { return }
+              syncProfilePopup != nil,
+              syncNameField != nil else { return }
 
-        let bounds = content.bounds
+        tabView.frame = rootContent.bounds
+        let tabContentRect = tabView.contentRect
+        moveTabContent.frame = tabContentRect
+        syncTabContent.frame = tabContentRect
+
+        let bounds = moveTabContent.bounds
         let width = max(bounds.width, 980)
         let height = max(bounds.height, 540)
         let margin: CGFloat = 20
@@ -900,7 +970,7 @@ class Controller: NSObject, NSWindowDelegate {
         let sortY = height - 112
         let optionX = max(leftX + columnWidth + 10, rightX - 80)
         let pathButtonY = sortY - 96
-        let tableY: CGFloat = 80
+        let tableY: CGFloat = 20
         let tableHeight = max(170, pathButtonY - tableY - 10)
 
         let buttonGap: CGFloat = 8
@@ -944,18 +1014,6 @@ class Controller: NSObject, NSWindowDelegate {
         backDstButton.frame = NSRect(x: rightX + 160, y: pathButtonY, width: 80, height: 26)
         recentDestinationPopup.frame = NSRect(x: rightX + columnWidth - 190, y: pathButtonY, width: 190, height: 26)
 
-        let syncY: CGFloat = 46
-        var syncX = margin
-        syncProfilePopup.frame = NSRect(x: syncX, y: syncY + 3, width: 220, height: 26)
-        syncX += 230
-        saveSyncProfileButton.frame = NSRect(x: syncX, y: syncY, width: 110, height: 28)
-        syncX += 120
-        toggleSyncProfileButton.frame = NSRect(x: syncX, y: syncY, width: 110, height: 28)
-        syncX += 120
-        runSyncProfileButton.frame = NSRect(x: syncX, y: syncY, width: 90, height: 28)
-        syncX += 105
-        syncStatusLabel.frame = NSRect(x: syncX, y: syncY + 4, width: max(220, width - syncX - margin), height: 20)
-
         let srcTableFrame = NSRect(x: leftX, y: tableY, width: columnWidth, height: tableHeight)
         let dstTableFrame = NSRect(x: rightX, y: tableY, width: columnWidth, height: tableHeight)
         srcTable.enclosingScrollView?.frame = srcTableFrame
@@ -964,6 +1022,57 @@ class Controller: NSObject, NSWindowDelegate {
         dstTable.frame = NSRect(origin: .zero, size: dstTableFrame.size)
         srcTable.tableColumns.first?.width = max(100, columnWidth - 20)
         dstTable.tableColumns.first?.width = max(100, columnWidth - 20)
+
+        layoutSyncTab()
+    }
+
+    func layoutSyncTab() {
+        guard syncTabContent != nil,
+              syncProfilePopup != nil,
+              syncNameField != nil,
+              syncSrcField != nil,
+              syncDstField != nil else { return }
+
+        let bounds = syncTabContent.bounds
+        let width = max(bounds.width, 980)
+        let height = max(bounds.height, 540)
+        let margin: CGFloat = 20
+        let rowHeight: CGFloat = 24
+        let iconSize: CGFloat = 28
+        let labelW: CGFloat = 90
+
+        let topY = height - 52
+        syncProfilePopup.frame = NSRect(x: margin, y: topY + 3, width: 240, height: 26)
+        saveSyncProfileButton.frame = NSRect(x: 275, y: topY, width: 110, height: 28)
+        toggleSyncProfileButton.frame = NSRect(x: 395, y: topY, width: 115, height: 28)
+        runSyncProfileButton.frame = NSRect(x: 520, y: topY, width: 90, height: 28)
+
+        let fieldX = margin + labelW + 10
+        let fieldRightInset: CGFloat = 58
+        let fieldW = max(260, width - fieldX - fieldRightInset - margin)
+
+        let nameY = topY - 56
+        syncNameLabel.frame = NSRect(x: margin, y: nameY + 3, width: labelW, height: 20)
+        syncNameField.frame = NSRect(x: fieldX, y: nameY, width: min(460, fieldW), height: rowHeight)
+
+        let srcY = nameY - 44
+        syncSrcLabel.frame = NSRect(x: margin, y: srcY + 3, width: labelW, height: 20)
+        syncSrcField.frame = NSRect(x: fieldX, y: srcY, width: fieldW, height: rowHeight)
+        chooseSyncSrcButton.frame = NSRect(x: fieldX + fieldW + 8, y: srcY - 2, width: iconSize, height: iconSize)
+
+        let dstY = srcY - 44
+        syncDstLabel.frame = NSRect(x: margin, y: dstY + 3, width: labelW, height: 20)
+        syncDstField.frame = NSRect(x: fieldX, y: dstY, width: fieldW, height: rowHeight)
+        chooseSyncDstButton.frame = NSRect(x: fieldX + fieldW + 8, y: dstY - 2, width: iconSize, height: iconSize)
+
+        let optionsY = dstY - 52
+        syncIntervalLabel.frame = NSRect(x: margin, y: optionsY + 3, width: labelW, height: 20)
+        syncIntervalField.frame = NSRect(x: fieldX, y: optionsY, width: 80, height: rowHeight)
+        syncEnabledCheckbox.frame = NSRect(x: fieldX + 105, y: optionsY, width: 180, height: 22)
+        syncDeleteExtraCheckbox.frame = NSRect(x: fieldX, y: optionsY - 34, width: 290, height: 22)
+        syncXattrsCheckbox.frame = NSRect(x: fieldX, y: optionsY - 66, width: 320, height: 22)
+
+        syncStatusLabel.frame = NSRect(x: margin, y: 24, width: width - (2 * margin), height: 20)
     }
 
     @objc func chooseSrc() {
@@ -975,6 +1084,18 @@ class Controller: NSObject, NSWindowDelegate {
     @objc func chooseDst() {
         if let p = pickFolder(start: dstField.stringValue) {
             setDstPath(p, rememberRecent: true)
+        }
+    }
+
+    @objc func chooseSyncSrc() {
+        if let p = pickFolder(start: syncSrcField.stringValue) {
+            syncSrcField.stringValue = p
+        }
+    }
+
+    @objc func chooseSyncDst() {
+        if let p = pickFolder(start: syncDstField.stringValue) {
+            syncDstField.stringValue = p
         }
     }
 
@@ -1071,62 +1192,24 @@ class Controller: NSObject, NSWindowDelegate {
         guard let id = sender.selectedItem?.representedObject as? String,
               let profile = syncProfiles.first(where: { $0.id == id }) else { return }
         selectedSyncProfileId = id
-        setSrcPath(profile.srcPath, rememberRecent: true)
-        setDstPath(profile.dstPath, rememberRecent: true)
-        copyXattrsEnabled = profile.copyXattrs
-        xattrsCheckbox?.state = profile.copyXattrs ? .on : .off
+        applySyncProfileToFields(profile)
         refreshSyncProfileMenu()
         updateSyncStatusLabel(profile: profile)
         log("Sync-profiel geselecteerd: \(profile.name)")
     }
 
     @objc func saveCurrentSyncProfile() {
-        let alert = NSAlert()
-        alert.messageText = "Sync-profiel bewaren"
-        alert.informativeText = "Bewaar de huidige Bron en Doel als eenrichtings-sync: Bron -> Doel."
-
-        let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 380, height: 140))
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        let srcName = (srcField.stringValue as NSString).lastPathComponent
         let existing = selectedSyncProfile()
-        nameField.stringValue = existing?.name ?? (srcName.isEmpty ? "Nieuwe sync" : srcName)
-
-        let intervalField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
-        intervalField.stringValue = "\(existing?.intervalMinutes ?? 15)"
-
-        let enabledCheck = NSButton(checkboxWithTitle: "Automatisch syncen", target: nil, action: nil)
-        enabledCheck.state = (existing?.enabled ?? true) ? .on : .off
-        let deleteCheck = NSButton(checkboxWithTitle: "Extra bestanden op doel verwijderen", target: nil, action: nil)
-        deleteCheck.state = (existing?.deleteExtra ?? false) ? .on : .off
-        let xattrCheck = NSButton(checkboxWithTitle: "Bestandsattributen (xattrs) kopiëren", target: nil, action: nil)
-        xattrCheck.state = (existing?.copyXattrs ?? copyXattrsEnabled) ? .on : .off
-
-        stack.addArrangedSubview(NSTextField(labelWithString: "Naam"))
-        stack.addArrangedSubview(nameField)
-        stack.addArrangedSubview(NSTextField(labelWithString: "Interval in minuten"))
-        stack.addArrangedSubview(intervalField)
-        stack.addArrangedSubview(enabledCheck)
-        stack.addArrangedSubview(deleteCheck)
-        stack.addArrangedSubview(xattrCheck)
-
-        alert.accessoryView = stack
-        alert.addButton(withTitle: "Bewaar")
-        alert.addButton(withTitle: "Annuleer")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = syncNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        let srcPath = normalizePath(srcField.stringValue)
-        let dstPath = normalizePath(dstField.stringValue)
+        let srcPath = normalizePath(syncSrcField.stringValue)
+        let dstPath = normalizePath(syncDstField.stringValue)
         guard !srcPath.isEmpty, !dstPath.isEmpty else {
             self.alert("Bron en doel mogen niet leeg zijn.")
             return
         }
-        let interval = max(1, Int(intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 15)
+        let interval = max(1, Int(syncIntervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 15)
+        syncIntervalField.stringValue = "\(interval)"
         let id = existing?.id ?? UUID().uuidString
         let profile = SyncProfile(
             id: id,
@@ -1134,9 +1217,9 @@ class Controller: NSObject, NSWindowDelegate {
             srcPath: srcPath,
             dstPath: dstPath,
             intervalMinutes: interval,
-            enabled: enabledCheck.state == .on,
-            deleteExtra: deleteCheck.state == .on,
-            copyXattrs: xattrCheck.state == .on,
+            enabled: syncEnabledCheckbox.state == .on,
+            deleteExtra: syncDeleteExtraCheckbox.state == .on,
+            copyXattrs: syncXattrsCheckbox.state == .on,
             lastRunAt: existing?.lastRunAt,
             lastStatus: existing?.lastStatus ?? "Nog niet gesynct",
             consecutiveFailures: existing?.consecutiveFailures ?? 0,
@@ -1161,6 +1244,7 @@ class Controller: NSObject, NSWindowDelegate {
         syncProfiles[idx].updatedAt = Date()
         saveSyncProfiles()
         updateSyncStatusLabel(profile: syncProfiles[idx])
+        syncEnabledCheckbox.state = syncProfiles[idx].enabled ? .on : .off
         log("Sync-profiel \(syncProfiles[idx].enabled ? "ingeschakeld" : "uitgeschakeld"): \(syncProfiles[idx].name)")
     }
 
@@ -1979,6 +2063,17 @@ class Controller: NSObject, NSWindowDelegate {
     func selectedSyncProfile() -> SyncProfile? {
         guard let id = selectedSyncProfileId else { return nil }
         return syncProfiles.first(where: { $0.id == id })
+    }
+
+    func applySyncProfileToFields(_ profile: SyncProfile) {
+        guard syncNameField != nil else { return }
+        syncNameField.stringValue = profile.name
+        syncSrcField.stringValue = profile.srcPath
+        syncDstField.stringValue = profile.dstPath
+        syncIntervalField.stringValue = "\(max(1, profile.intervalMinutes))"
+        syncEnabledCheckbox.state = profile.enabled ? .on : .off
+        syncDeleteExtraCheckbox.state = profile.deleteExtra ? .on : .off
+        syncXattrsCheckbox.state = profile.copyXattrs ? .on : .off
     }
 
     func refreshSyncProfileMenu() {

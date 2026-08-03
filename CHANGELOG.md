@@ -2,6 +2,15 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.1] - 2026-08-03
+
+### Gewijzigd
+
+- Hoofdvenster heeft nu aparte tabbladen voor `Move folders` en `Sync folders`.
+- Bestaande overdrachtbediening staat in `Move folders`.
+- Sync-profielen hebben een eigen `Sync folders` formulier met profielnaam, Folder A, Folder B, interval en sync-opties.
+- De move-tabellen gebruiken de vrijgekomen ruimte onderaan nu volledig.
+
 ## [0.8] - 2026-08-03
 
 ### Toegevoegd
