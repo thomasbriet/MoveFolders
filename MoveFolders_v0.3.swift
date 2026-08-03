@@ -506,6 +506,10 @@ class Controller: NSObject, NSWindowDelegate {
     var syncXattrsCheckbox: NSButton!
     var chooseSyncSrcButton: NSButton!
     var chooseSyncDstButton: NSButton!
+    var syncProgressTitleLabel: NSTextField!
+    var syncProgressDetailLabel: NSTextField!
+    var syncProgressSpeedLabel: NSTextField!
+    var syncProgressBar: NSProgressIndicator!
     var chooseSrcButton: NSButton!
     var swapPathsButton: NSButton!
     var chooseDstButton: NSButton!
@@ -562,6 +566,10 @@ class Controller: NSObject, NSWindowDelegate {
     var syncRunningProfileIds: Set<String> = []
     var syncTimer: DispatchSourceTimer?
     var selectedSyncProfileId: String?
+    var activeSyncProgressProfileId: String?
+    var syncProgressPercent: Int = 0
+    var syncProgressSpeedText: String = ""
+    var syncProgressEtaText: String = ""
     var srcListToken: Int = 0
     var dstListToken: Int = 0
     let recentSourceDefaults = UserDefaults(suiteName: "com.thomasbriet.MoveFolders") ?? UserDefaults.standard
@@ -904,6 +912,27 @@ class Controller: NSObject, NSWindowDelegate {
         syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
         syncXattrsCheckbox.autoresizingMask = []
         syncContent.addSubview(syncXattrsCheckbox)
+        syncProgressTitleLabel = NSTextField(labelWithString: "Voortgang: geen sync actief")
+        syncProgressTitleLabel.lineBreakMode = .byTruncatingMiddle
+        syncProgressTitleLabel.autoresizingMask = []
+        syncContent.addSubview(syncProgressTitleLabel)
+        syncProgressDetailLabel = NSTextField(labelWithString: "Bestand: -")
+        syncProgressDetailLabel.lineBreakMode = .byTruncatingMiddle
+        syncProgressDetailLabel.autoresizingMask = []
+        syncContent.addSubview(syncProgressDetailLabel)
+        syncProgressSpeedLabel = NSTextField(labelWithString: "Snelheid: - | ETA: -")
+        syncProgressSpeedLabel.lineBreakMode = .byTruncatingMiddle
+        syncProgressSpeedLabel.autoresizingMask = []
+        syncContent.addSubview(syncProgressSpeedLabel)
+        syncProgressBar = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 200, height: 12))
+        syncProgressBar.minValue = 0
+        syncProgressBar.maxValue = 100
+        syncProgressBar.doubleValue = 0
+        syncProgressBar.isIndeterminate = false
+        syncProgressBar.controlSize = .small
+        syncProgressBar.style = .bar
+        syncProgressBar.autoresizingMask = []
+        syncContent.addSubview(syncProgressBar)
         syncStatusLabel = NSTextField(labelWithString: "Sync: geen profiel")
         syncStatusLabel.lineBreakMode = .byTruncatingMiddle
         syncStatusLabel.autoresizingMask = []
@@ -1071,6 +1100,12 @@ class Controller: NSObject, NSWindowDelegate {
         syncEnabledCheckbox.frame = NSRect(x: fieldX + 105, y: optionsY, width: 180, height: 22)
         syncDeleteExtraCheckbox.frame = NSRect(x: fieldX, y: optionsY - 34, width: 290, height: 22)
         syncXattrsCheckbox.frame = NSRect(x: fieldX, y: optionsY - 66, width: 320, height: 22)
+
+        let progressY = max(72, optionsY - 135)
+        syncProgressTitleLabel.frame = NSRect(x: margin, y: progressY + 68, width: width - (2 * margin), height: 20)
+        syncProgressBar.frame = NSRect(x: margin, y: progressY + 46, width: width - (2 * margin), height: 12)
+        syncProgressDetailLabel.frame = NSRect(x: margin, y: progressY + 20, width: width - (2 * margin), height: 20)
+        syncProgressSpeedLabel.frame = NSRect(x: margin, y: progressY - 4, width: width - (2 * margin), height: 20)
 
         syncStatusLabel.frame = NSRect(x: margin, y: 24, width: width - (2 * margin), height: 20)
     }
@@ -2198,11 +2233,85 @@ class Controller: NSObject, NSWindowDelegate {
         }
     }
 
+    func resetSyncProgress(profile: SyncProfile) {
+        DispatchQueue.main.async {
+            self.activeSyncProgressProfileId = profile.id
+            self.syncProgressPercent = 0
+            self.syncProgressSpeedText = ""
+            self.syncProgressEtaText = ""
+            self.syncProgressTitleLabel?.stringValue = "Voortgang: \(profile.name) bezig..."
+            self.syncProgressDetailLabel?.stringValue = "Bestand: voorbereiden..."
+            self.syncProgressSpeedLabel?.stringValue = "Snelheid: - | ETA: -"
+            self.syncProgressBar?.isIndeterminate = false
+            self.syncProgressBar?.doubleValue = 0
+        }
+    }
+
+    func updateSyncProgress(profileId: String, percent: Int? = nil, speed: String? = nil, eta: String? = nil, detail: String? = nil) {
+        DispatchQueue.main.async {
+            guard self.activeSyncProgressProfileId == profileId else { return }
+            if let percent = percent {
+                self.syncProgressPercent = max(0, min(100, percent))
+                self.syncProgressBar?.doubleValue = Double(self.syncProgressPercent)
+            }
+            if let speed = speed { self.syncProgressSpeedText = speed }
+            if let eta = eta { self.syncProgressEtaText = eta }
+            if let detail = detail, !detail.isEmpty {
+                self.syncProgressDetailLabel?.stringValue = "Bestand: \(detail)"
+            }
+            let speedText = self.syncProgressSpeedText.isEmpty ? "-" : self.syncProgressSpeedText
+            let etaText = self.syncProgressEtaText.isEmpty ? "-" : self.syncProgressEtaText
+            self.syncProgressSpeedLabel?.stringValue = "Snelheid: \(speedText) | ETA: \(etaText)"
+            let profileName = self.syncProfiles.first(where: { $0.id == profileId })?.name ?? "sync"
+            self.syncProgressTitleLabel?.stringValue = "Voortgang: \(profileName) (\(self.syncProgressPercent)%)"
+        }
+    }
+
+    func finishSyncProgress(profileId: String, profileName: String, status: String, success: Bool) {
+        DispatchQueue.main.async {
+            guard self.activeSyncProgressProfileId == profileId else { return }
+            self.syncProgressPercent = success ? 100 : self.syncProgressPercent
+            self.syncProgressBar?.doubleValue = Double(self.syncProgressPercent)
+            self.syncProgressTitleLabel?.stringValue = "Voortgang: \(profileName) \(success ? "klaar" : "gestopt")"
+            self.syncProgressDetailLabel?.stringValue = status
+            if success {
+                self.syncProgressSpeedLabel?.stringValue = "Snelheid: - | ETA: 0:00:00"
+            }
+        }
+    }
+
+    func syncProgressDetail(fromRsyncLine line: String) -> String? {
+        var candidate = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return nil }
+        let skipPrefixes = [
+            "sending incremental file list",
+            "sent ",
+            "total size is",
+            "total bytes",
+            "file list size"
+        ]
+        if skipPrefixes.contains(where: { candidate.hasPrefix($0) }) { return nil }
+        if candidate.range(of: #"^[0-9.,]+\s*[KMGTPE]?B\s+[0-9]+%"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return nil
+        }
+        if candidate.hasPrefix("*deleting") {
+            return candidate
+        }
+        if let first = candidate.first, first == ">" || first == "c" || first == "." || first == "*" {
+            if let space = candidate.firstIndex(of: " ") {
+                candidate = String(candidate[candidate.index(after: space)...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        if candidate.hasPrefix("./") { candidate.removeFirst(2) }
+        return candidate.isEmpty ? nil : candidate
+    }
+
     func startSyncRun(profile: SyncProfile, manual: Bool) {
         guard markSyncProfileRunning(profile.id) else {
             if manual { alert("Dit sync-profiel draait al.") }
             return
         }
+        resetSyncProgress(profile: profile)
         updateSyncProfile(id: profile.id) { item in
             item.lastStatus = "Bezig..."
         }
@@ -2234,6 +2343,7 @@ class Controller: NSObject, NSWindowDelegate {
         let flags = rsyncFlags(
             includePartial: true,
             includeItemize: true,
+            includeProgress: true,
             includeStats: true,
             includeXattrs: profile.copyXattrs,
             includeDelete: profile.deleteExtra
@@ -2250,6 +2360,12 @@ class Controller: NSObject, NSWindowDelegate {
             } else if trimmed.first == ">" || trimmed.first == "c" || trimmed.first == "." {
                 countQueue.sync { changed += 1 }
             }
+            if let metrics = self.rsyncProgressMetrics(from: trimmed) {
+                self.updateSyncProgress(profileId: profile.id, percent: metrics.percent, speed: metrics.speed, eta: metrics.eta)
+            }
+            if let detail = self.syncProgressDetail(fromRsyncLine: trimmed) {
+                self.updateSyncProgress(profileId: profile.id, detail: detail)
+            }
             self.log("Sync \(profile.name): \(trimmed)")
         }
         let counts = countQueue.sync { (changed, deleted) }
@@ -2265,6 +2381,7 @@ class Controller: NSObject, NSWindowDelegate {
 
     func finishSyncProfile(_ profile: SyncProfile, success: Bool, status: String) {
         log("Sync klaar: \(profile.name) | \(status)")
+        finishSyncProgress(profileId: profile.id, profileName: profile.name, status: status, success: success)
         updateSyncProfile(id: profile.id) { item in
             item.lastRunAt = Date()
             item.lastStatus = status

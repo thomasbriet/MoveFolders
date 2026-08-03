@@ -2,6 +2,13 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.2] - 2026-08-03
+
+### Toegevoegd
+
+- `Sync folders` toont nu een voortgangssectie met actief profiel, progressbalk, huidig bestand/pad, snelheid en ETA.
+- Handmatige en automatische sync-runs werken dezelfde voortgang bij tijdens het kopiëren.
+
 ## [0.8.1] - 2026-08-03
 
 ### Gewijzigd
