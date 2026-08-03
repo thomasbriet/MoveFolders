@@ -1101,7 +1101,7 @@ class Controller: NSObject, NSWindowDelegate {
         syncDeleteExtraCheckbox.frame = NSRect(x: fieldX, y: optionsY - 34, width: 290, height: 22)
         syncXattrsCheckbox.frame = NSRect(x: fieldX, y: optionsY - 66, width: 320, height: 22)
 
-        let progressY = max(72, optionsY - 135)
+        let progressY = max(72, optionsY - 185)
         syncProgressTitleLabel.frame = NSRect(x: margin, y: progressY + 68, width: width - (2 * margin), height: 20)
         syncProgressBar.frame = NSRect(x: margin, y: progressY + 46, width: width - (2 * margin), height: 12)
         syncProgressDetailLabel.frame = NSRect(x: margin, y: progressY + 20, width: width - (2 * margin), height: 20)

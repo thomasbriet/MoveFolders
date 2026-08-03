@@ -2,6 +2,12 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.3] - 2026-08-03
+
+### Opgelost
+
+- De voortgangstekst in `Sync folders` overlapt niet meer met de optie `Bestandsattributen (xattrs) kopiëren`.
+
 ## [0.8.2] - 2026-08-03
 
 ### Toegevoegd
