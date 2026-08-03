@@ -420,7 +420,7 @@ class Controller: NSObject, NSWindowDelegate {
         return fallback
     }
 
-    func rsyncFlags(includeUpdate: Bool = false, includePartial: Bool = false, includeInplace: Bool = false, includeDryRun: Bool = false, includeItemize: Bool = false, includeProgress: Bool = false, includePerFileProgress: Bool = false, includeStats: Bool = false, includeXattrs: Bool = true, outFormatMarker: String? = nil) -> String {
+    func rsyncFlags(includeUpdate: Bool = false, includePartial: Bool = false, includeInplace: Bool = false, includeDryRun: Bool = false, includeItemize: Bool = false, includeProgress: Bool = false, includePerFileProgress: Bool = false, includeStats: Bool = false, includeXattrs: Bool = true, includeDelete: Bool = false, outFormatMarker: String? = nil) -> String {
         var flags: [String] = ["-ah", "--modify-window=2", "--exclude '.DS_Store'"]
         let cfg = rsyncConfig
 
@@ -429,6 +429,7 @@ class Controller: NSObject, NSWindowDelegate {
         if includePartial { flags.append("--partial") }
         if includeInplace { flags.append("--inplace") }
         if includeItemize { flags.append("--itemize-changes") }
+        if includeDelete { flags.append("--delete") }
         if cfg.supportsNoGroup { flags.append("--no-group") }
         if cfg.supportsNoOwner { flags.append("--no-owner") }
         if cfg.supportsProtectArgs { flags.append("--protect-args") }
@@ -484,6 +485,11 @@ class Controller: NSObject, NSWindowDelegate {
     var updatesButton: NSButton!
     var resumeButton: NSButton!
     var saveFavoriteButton: NSButton!
+    var syncProfilePopup: NSPopUpButton!
+    var saveSyncProfileButton: NSButton!
+    var toggleSyncProfileButton: NSButton!
+    var runSyncProfileButton: NSButton!
+    var syncStatusLabel: NSTextField!
     var chooseSrcButton: NSButton!
     var swapPathsButton: NSButton!
     var chooseDstButton: NSButton!
@@ -536,6 +542,10 @@ class Controller: NSObject, NSWindowDelegate {
     var recentDestinationPaths: [String] = []
     var favoritePresets: [FavoriteTransferPreset] = []
     var lastResumeJob: ResumableTransferJob?
+    var syncProfiles: [SyncProfile] = []
+    var syncRunningProfileIds: Set<String> = []
+    var syncTimer: DispatchSourceTimer?
+    var selectedSyncProfileId: String?
     var srcListToken: Int = 0
     var dstListToken: Int = 0
     let recentSourceDefaults = UserDefaults(suiteName: "com.thomasbriet.MoveFolders") ?? UserDefaults.standard
@@ -543,9 +553,11 @@ class Controller: NSObject, NSWindowDelegate {
     let recentDestinationDefaultsKey = "recentDestinationPaths"
     let favoritePresetsDefaultsKey = "favoriteTransferPresets"
     let resumeJobDefaultsKey = "lastResumeJob"
+    let syncProfilesDefaultsKey = "syncProfiles"
     let recentSourceLimit = 5
     let favoritePresetLimit = 20
     let resumeStateQueue = DispatchQueue(label: "MoveFolders.resumeState")
+    let syncStateQueue = DispatchQueue(label: "MoveFolders.syncState")
     let pendingCleanupStateQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.state")
     var pendingCleanupPaths: Set<String> = []
     let transferControlQueue = DispatchQueue(label: "MoveFolders.transferControl")
@@ -608,6 +620,21 @@ class Controller: NSObject, NSWindowDelegate {
         var srcPath: String
         var dstPath: String
         var options: TransferOptions
+        var updatedAt: Date
+    }
+
+    struct SyncProfile: Codable {
+        let id: String
+        var name: String
+        var srcPath: String
+        var dstPath: String
+        var intervalMinutes: Int
+        var enabled: Bool
+        var deleteExtra: Bool
+        var copyXattrs: Bool
+        var lastRunAt: Date?
+        var lastStatus: String
+        var consecutiveFailures: Int
         var updatedAt: Date
     }
 
@@ -752,6 +779,7 @@ class Controller: NSObject, NSWindowDelegate {
         recentDestinationPaths = loadRecentDestinationPaths()
         favoritePresets = loadFavoritePresets()
         lastResumeJob = loadResumeJob()
+        syncProfiles = loadSyncProfiles()
         recentSourcePopup = makePopup(380, 575, 180, #selector(selectRecentSource))
         recentDestinationPopup = makePopup(380, 545, 180, #selector(selectRecentDestination))
         favoritePopup = makePopup(20, 575, 170, #selector(selectFavoritePreset))
@@ -815,6 +843,15 @@ class Controller: NSObject, NSWindowDelegate {
         backSrcButton = makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
         applyDstButton = makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
         backDstButton = makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
+        syncProfilePopup = makePopup(20, 48, 220, #selector(selectSyncProfile))
+        saveSyncProfileButton = makeButton("Bewaar sync", 250, 45, 110, 28, #selector(saveCurrentSyncProfile))
+        toggleSyncProfileButton = makeButton("Sync aan/uit", 370, 45, 110, 28, #selector(toggleSelectedSyncProfile))
+        runSyncProfileButton = makeButton("Sync nu", 490, 45, 90, 28, #selector(runSelectedSyncProfileNow))
+        syncStatusLabel = NSTextField(labelWithString: "Sync: geen profiel")
+        syncStatusLabel.lineBreakMode = .byTruncatingMiddle
+        syncStatusLabel.autoresizingMask = []
+        content.addSubview(syncStatusLabel)
+        refreshSyncProfileMenu()
         updateResumeButton()
         layoutMainWindow()
 
@@ -830,6 +867,7 @@ class Controller: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             self.schedulePendingDeleteCleanup(basePath: self.srcField.stringValue)
         }
+        startSyncScheduler()
 
         app.run()
     }
@@ -843,7 +881,8 @@ class Controller: NSObject, NSWindowDelegate {
               srcField != nil,
               dstField != nil,
               srcTable != nil,
-              dstTable != nil else { return }
+              dstTable != nil,
+              syncProfilePopup != nil else { return }
 
         let bounds = content.bounds
         let width = max(bounds.width, 980)
@@ -904,6 +943,18 @@ class Controller: NSObject, NSWindowDelegate {
         applyDstButton.frame = NSRect(x: rightX, y: pathButtonY, width: 150, height: 26)
         backDstButton.frame = NSRect(x: rightX + 160, y: pathButtonY, width: 80, height: 26)
         recentDestinationPopup.frame = NSRect(x: rightX + columnWidth - 190, y: pathButtonY, width: 190, height: 26)
+
+        let syncY: CGFloat = 46
+        var syncX = margin
+        syncProfilePopup.frame = NSRect(x: syncX, y: syncY + 3, width: 220, height: 26)
+        syncX += 230
+        saveSyncProfileButton.frame = NSRect(x: syncX, y: syncY, width: 110, height: 28)
+        syncX += 120
+        toggleSyncProfileButton.frame = NSRect(x: syncX, y: syncY, width: 110, height: 28)
+        syncX += 120
+        runSyncProfileButton.frame = NSRect(x: syncX, y: syncY, width: 90, height: 28)
+        syncX += 105
+        syncStatusLabel.frame = NSRect(x: syncX, y: syncY + 4, width: max(220, width - syncX - margin), height: 20)
 
         let srcTableFrame = NSRect(x: leftX, y: tableY, width: columnWidth, height: tableHeight)
         let dstTableFrame = NSRect(x: rightX, y: tableY, width: columnWidth, height: tableHeight)
@@ -1013,6 +1064,112 @@ class Controller: NSObject, NSWindowDelegate {
         }
         saveFavoritePresets()
         log("Favoriet bewaard: \(name)")
+    }
+
+    @objc func selectSyncProfile(_ sender: NSPopUpButton) {
+        defer { sender.selectItem(at: 0) }
+        guard let id = sender.selectedItem?.representedObject as? String,
+              let profile = syncProfiles.first(where: { $0.id == id }) else { return }
+        selectedSyncProfileId = id
+        setSrcPath(profile.srcPath, rememberRecent: true)
+        setDstPath(profile.dstPath, rememberRecent: true)
+        copyXattrsEnabled = profile.copyXattrs
+        xattrsCheckbox?.state = profile.copyXattrs ? .on : .off
+        refreshSyncProfileMenu()
+        updateSyncStatusLabel(profile: profile)
+        log("Sync-profiel geselecteerd: \(profile.name)")
+    }
+
+    @objc func saveCurrentSyncProfile() {
+        let alert = NSAlert()
+        alert.messageText = "Sync-profiel bewaren"
+        alert.informativeText = "Bewaar de huidige Bron en Doel als eenrichtings-sync: Bron -> Doel."
+
+        let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 380, height: 140))
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        let srcName = (srcField.stringValue as NSString).lastPathComponent
+        let existing = selectedSyncProfile()
+        nameField.stringValue = existing?.name ?? (srcName.isEmpty ? "Nieuwe sync" : srcName)
+
+        let intervalField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        intervalField.stringValue = "\(existing?.intervalMinutes ?? 15)"
+
+        let enabledCheck = NSButton(checkboxWithTitle: "Automatisch syncen", target: nil, action: nil)
+        enabledCheck.state = (existing?.enabled ?? true) ? .on : .off
+        let deleteCheck = NSButton(checkboxWithTitle: "Extra bestanden op doel verwijderen", target: nil, action: nil)
+        deleteCheck.state = (existing?.deleteExtra ?? false) ? .on : .off
+        let xattrCheck = NSButton(checkboxWithTitle: "Bestandsattributen (xattrs) kopiëren", target: nil, action: nil)
+        xattrCheck.state = (existing?.copyXattrs ?? copyXattrsEnabled) ? .on : .off
+
+        stack.addArrangedSubview(NSTextField(labelWithString: "Naam"))
+        stack.addArrangedSubview(nameField)
+        stack.addArrangedSubview(NSTextField(labelWithString: "Interval in minuten"))
+        stack.addArrangedSubview(intervalField)
+        stack.addArrangedSubview(enabledCheck)
+        stack.addArrangedSubview(deleteCheck)
+        stack.addArrangedSubview(xattrCheck)
+
+        alert.accessoryView = stack
+        alert.addButton(withTitle: "Bewaar")
+        alert.addButton(withTitle: "Annuleer")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let srcPath = normalizePath(srcField.stringValue)
+        let dstPath = normalizePath(dstField.stringValue)
+        guard !srcPath.isEmpty, !dstPath.isEmpty else {
+            self.alert("Bron en doel mogen niet leeg zijn.")
+            return
+        }
+        let interval = max(1, Int(intervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 15)
+        let id = existing?.id ?? UUID().uuidString
+        let profile = SyncProfile(
+            id: id,
+            name: name,
+            srcPath: srcPath,
+            dstPath: dstPath,
+            intervalMinutes: interval,
+            enabled: enabledCheck.state == .on,
+            deleteExtra: deleteCheck.state == .on,
+            copyXattrs: xattrCheck.state == .on,
+            lastRunAt: existing?.lastRunAt,
+            lastStatus: existing?.lastStatus ?? "Nog niet gesynct",
+            consecutiveFailures: existing?.consecutiveFailures ?? 0,
+            updatedAt: Date()
+        )
+
+        syncProfiles.removeAll { $0.id == id || $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        syncProfiles.insert(profile, at: 0)
+        selectedSyncProfileId = profile.id
+        saveSyncProfiles()
+        updateSyncStatusLabel(profile: profile)
+        log("Sync-profiel bewaard: \(profile.name)")
+    }
+
+    @objc func toggleSelectedSyncProfile() {
+        guard let id = selectedSyncProfileId,
+              let idx = syncProfiles.firstIndex(where: { $0.id == id }) else {
+            alert("Selecteer eerst een sync-profiel.")
+            return
+        }
+        syncProfiles[idx].enabled.toggle()
+        syncProfiles[idx].updatedAt = Date()
+        saveSyncProfiles()
+        updateSyncStatusLabel(profile: syncProfiles[idx])
+        log("Sync-profiel \(syncProfiles[idx].enabled ? "ingeschakeld" : "uitgeschakeld"): \(syncProfiles[idx].name)")
+    }
+
+    @objc func runSelectedSyncProfileNow() {
+        guard let profile = selectedSyncProfile() else {
+            alert("Selecteer eerst een sync-profiel.")
+            return
+        }
+        startSyncRun(profile: profile, manual: true)
     }
 
     func showProgress(_ message: String, detail: String) {
@@ -1799,6 +1956,226 @@ class Controller: NSObject, NSWindowDelegate {
         guard let data = try? JSONEncoder().encode(favoritePresets) else { return }
         recentSourceDefaults.set(data, forKey: favoritePresetsDefaultsKey)
         refreshFavoriteMenu()
+    }
+
+    func loadSyncProfiles() -> [SyncProfile] {
+        guard let data = recentSourceDefaults.data(forKey: syncProfilesDefaultsKey),
+              let decoded = try? JSONDecoder().decode([SyncProfile].self, from: data) else { return [] }
+        return decoded
+    }
+
+    func saveSyncProfiles() {
+        syncProfiles.sort {
+            if $0.enabled != $1.enabled { return $0.enabled && !$1.enabled }
+            return $0.updatedAt > $1.updatedAt
+        }
+        if let data = try? JSONEncoder().encode(syncProfiles) {
+            recentSourceDefaults.set(data, forKey: syncProfilesDefaultsKey)
+            recentSourceDefaults.synchronize()
+        }
+        refreshSyncProfileMenu()
+    }
+
+    func selectedSyncProfile() -> SyncProfile? {
+        guard let id = selectedSyncProfileId else { return nil }
+        return syncProfiles.first(where: { $0.id == id })
+    }
+
+    func refreshSyncProfileMenu() {
+        guard syncProfilePopup != nil else { return }
+        syncProfilePopup.removeAllItems()
+        let selectedName = selectedSyncProfile()?.name
+        syncProfilePopup.addItem(withTitle: selectedName.map { "Sync: \($0)" } ?? "Sync-profielen")
+        syncProfilePopup.item(at: 0)?.isEnabled = false
+
+        if syncProfiles.isEmpty {
+            syncProfilePopup.addItem(withTitle: "Geen sync-profielen")
+            syncProfilePopup.lastItem?.isEnabled = false
+            syncProfilePopup.isEnabled = false
+            runSyncProfileButton?.isEnabled = false
+            toggleSyncProfileButton?.isEnabled = false
+            syncProfilePopup.selectItem(at: 0)
+            updateSyncStatusLabel(profile: nil)
+            return
+        }
+
+        syncProfilePopup.menu?.addItem(NSMenuItem.separator())
+        for profile in syncProfiles {
+            let prefix = profile.enabled ? "Aan" : "Uit"
+            syncProfilePopup.addItem(withTitle: "\(prefix): \(profile.name)")
+            syncProfilePopup.lastItem?.representedObject = profile.id
+            syncProfilePopup.lastItem?.toolTip = "\(profile.srcPath) -> \(profile.dstPath)"
+        }
+        syncProfilePopup.isEnabled = true
+        runSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
+        toggleSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
+        syncProfilePopup.selectItem(at: 0)
+    }
+
+    func updateSyncStatusLabel(profile: SyncProfile?) {
+        guard syncStatusLabel != nil else { return }
+        guard let profile = profile else {
+            syncStatusLabel.stringValue = "Sync: geen profiel"
+            return
+        }
+        let runText: String
+        if let lastRunAt = profile.lastRunAt {
+            runText = fileInfoFormatterQueue.sync { fileInfoFormatter.string(from: lastRunAt) }
+        } else {
+            runText = "nog niet"
+        }
+        let nextText: String
+        if profile.enabled, let next = nextSyncDate(for: profile) {
+            nextText = fileInfoFormatterQueue.sync { fileInfoFormatter.string(from: next) }
+        } else if profile.enabled {
+            nextText = "zodra mogelijk"
+        } else {
+            nextText = "uit"
+        }
+        syncStatusLabel.stringValue = "Sync: \(profile.name) | \(profile.enabled ? "aan" : "uit") | laatste: \(runText) | volgende: \(nextText) | \(profile.lastStatus)"
+    }
+
+    func nextSyncDate(for profile: SyncProfile) -> Date? {
+        guard let lastRunAt = profile.lastRunAt else { return nil }
+        let retryMinutes: Int
+        if profile.consecutiveFailures <= 0 {
+            retryMinutes = max(1, profile.intervalMinutes)
+        } else {
+            let backoff = [1, 5, 15, 30, 60]
+            retryMinutes = backoff[min(profile.consecutiveFailures - 1, backoff.count - 1)]
+        }
+        return lastRunAt.addingTimeInterval(TimeInterval(retryMinutes * 60))
+    }
+
+    func syncProfileIsDue(_ profile: SyncProfile, now: Date = Date()) -> Bool {
+        guard profile.enabled else { return false }
+        guard let next = nextSyncDate(for: profile) else { return true }
+        return now >= next
+    }
+
+    func syncProfilesSnapshot() -> [SyncProfile] {
+        if Thread.isMainThread { return syncProfiles }
+        return DispatchQueue.main.sync { syncProfiles }
+    }
+
+    func startSyncScheduler() {
+        syncTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 5, repeating: 30)
+        timer.setEventHandler { [weak self] in
+            self?.tickSyncProfiles()
+        }
+        syncTimer = timer
+        timer.resume()
+        log("Sync scheduler gestart")
+    }
+
+    func tickSyncProfiles() {
+        let now = Date()
+        for profile in syncProfilesSnapshot() where syncProfileIsDue(profile, now: now) {
+            startSyncRun(profile: profile, manual: false)
+        }
+    }
+
+    func markSyncProfileRunning(_ id: String) -> Bool {
+        syncStateQueue.sync {
+            if syncRunningProfileIds.contains(id) { return false }
+            syncRunningProfileIds.insert(id)
+            return true
+        }
+    }
+
+    func unmarkSyncProfileRunning(_ id: String) {
+        _ = syncStateQueue.sync {
+            syncRunningProfileIds.remove(id)
+        }
+    }
+
+    func updateSyncProfile(id: String, _ mutate: @escaping (inout SyncProfile) -> Void) {
+        DispatchQueue.main.async {
+            guard let idx = self.syncProfiles.firstIndex(where: { $0.id == id }) else { return }
+            mutate(&self.syncProfiles[idx])
+            let updated = self.syncProfiles[idx]
+            self.saveSyncProfiles()
+            if self.selectedSyncProfileId == id {
+                self.updateSyncStatusLabel(profile: updated)
+            }
+        }
+    }
+
+    func startSyncRun(profile: SyncProfile, manual: Bool) {
+        guard markSyncProfileRunning(profile.id) else {
+            if manual { alert("Dit sync-profiel draait al.") }
+            return
+        }
+        updateSyncProfile(id: profile.id) { item in
+            item.lastStatus = "Bezig..."
+        }
+        DispatchQueue.global(qos: .utility).async {
+            self.runSyncProfile(profile, manual: manual)
+        }
+    }
+
+    func runSyncProfile(_ profile: SyncProfile, manual: Bool) {
+        defer { unmarkSyncProfileRunning(profile.id) }
+        log("Sync start: \(profile.name) | \(profile.srcPath) -> \(profile.dstPath)")
+        let fm = FileManager.default
+        let srcPath = normalizePath(profile.srcPath)
+        let dstPath = normalizePath(profile.dstPath)
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: srcPath, isDirectory: &isDir), isDir.boolValue else {
+            finishSyncProfile(profile, success: false, status: "Bron niet bereikbaar")
+            return
+        }
+        do {
+            try fm.createDirectory(atPath: dstPath, withIntermediateDirectories: true)
+        } catch {
+            finishSyncProfile(profile, success: false, status: "Doel niet bereikbaar: \(error.localizedDescription)")
+            return
+        }
+
+        let srcArg = srcPath.hasSuffix("/") ? srcPath : "\(srcPath)/"
+        let dstArg = dstPath.hasSuffix("/") ? dstPath : "\(dstPath)/"
+        let flags = rsyncFlags(
+            includePartial: true,
+            includeItemize: true,
+            includeStats: true,
+            includeXattrs: profile.copyXattrs,
+            includeDelete: profile.deleteExtra
+        )
+        let cmd = "\(shellQuote(rsyncPath)) \(flags) \(shellQuote(srcArg)) \(shellQuote(dstArg))"
+        let countQueue = DispatchQueue(label: "MoveFolders.sync.count.\(profile.id)")
+        var changed = 0
+        var deleted = 0
+        let result = runCommandStreaming(cmd, timeout: nil, killGrace: commandKillGrace) { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            if trimmed.hasPrefix("*deleting") {
+                countQueue.sync { deleted += 1 }
+            } else if trimmed.first == ">" || trimmed.first == "c" || trimmed.first == "." {
+                countQueue.sync { changed += 1 }
+            }
+            self.log("Sync \(profile.name): \(trimmed)")
+        }
+        let counts = countQueue.sync { (changed, deleted) }
+        if result.exitCode == 0 && result.timedOut == false {
+            var status = counts.0 == 0 && counts.1 == 0 ? "OK: niets te syncen" : "OK: \(counts.0) wijzigingen"
+            if counts.1 > 0 { status += ", \(counts.1) verwijderd" }
+            finishSyncProfile(profile, success: true, status: status)
+        } else {
+            let timeoutText = result.timedOut ? " timeout" : ""
+            finishSyncProfile(profile, success: false, status: "Fout: rsync code \(result.exitCode)\(timeoutText)")
+        }
+    }
+
+    func finishSyncProfile(_ profile: SyncProfile, success: Bool, status: String) {
+        log("Sync klaar: \(profile.name) | \(status)")
+        updateSyncProfile(id: profile.id) { item in
+            item.lastRunAt = Date()
+            item.lastStatus = status
+            item.consecutiveFailures = success ? 0 : item.consecutiveFailures + 1
+            item.updatedAt = Date()
+        }
     }
 
     func loadResumeJob() -> ResumableTransferJob? {

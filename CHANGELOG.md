@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8] - 2026-08-03
+
+### Toegevoegd
+
+- Eerste versie van eenrichtings-syncprofielen: Folder A blijft leidend en wordt periodiek naar Folder B gesynct.
+- Sync-profielen bewaren bron, doel, interval, aan/uit-status, xattr-keuze en optioneel verwijderen van extra doelbestanden.
+- Sync-profielen draaien automatisch op de achtergrond zolang de app actief is.
+- Knoppen toegevoegd voor `Bewaar sync`, `Sync aan/uit` en `Sync nu`.
+- Sync-statusregel toont laatste run, volgende run en laatste status/fout.
+- Scheduler voorkomt overlappende sync-runs per profiel.
+- Bij onbereikbare servers of rsync-fouten wordt de fout opgeslagen en later opnieuw geprobeerd met oplopende retry-wachttijd.
+
 ## [0.7.3] - 2026-07-15
 
 ### Opgelost
