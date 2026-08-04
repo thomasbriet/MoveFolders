@@ -2,6 +2,19 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.5] - 2026-08-04
+
+### Toegevoegd
+
+- Nieuwe knop `Log` opent een apart, doorlopend overdrachtslog zonder automatisch een venster te tonen.
+- Per bestand wordt vastgelegd of het is overgezet of niet is overgezet, inclusief bronpad, doelpad en reden.
+- Handmatige mismatchkeuzes en bestandswijzigingen uit sync-profielen worden eveneens gelogd.
+- Het volledige log blijft tussen app-sessies bewaard in `~/Library/Logs/MoveFolders/overdrachten.log`.
+
+### Gewijzigd
+
+- Het logvenster is doorzoekbaar en toont bij zeer grote logs de meest recente 5 MB; het volledige bestand blijft onverkort op schijf staan.
+
 ## [0.8.4] - 2026-08-03
 
 ### Toegevoegd

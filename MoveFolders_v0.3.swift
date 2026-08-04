@@ -485,6 +485,7 @@ class Controller: NSObject, NSWindowDelegate {
     var xattrsCheckbox: NSButton!
     var startCopyButton: NSButton!
     var debugButton: NSButton!
+    var transferLogButton: NSButton!
     var updatesButton: NSButton!
     var resumeButton: NSButton!
     var saveFavoriteButton: NSButton!
@@ -593,12 +594,30 @@ class Controller: NSObject, NSWindowDelegate {
     let copyTimeout: TimeInterval = 1800
     var debugWindow: NSWindow?
     var debugTextView: NSTextView?
+    var transferLogWindow: NSWindow?
+    var transferLogTextView: NSTextView?
+    var transferLogFileHandle: FileHandle?
+    let transferLogQueue = DispatchQueue(label: "MoveFolders.transferLog")
+    lazy var transferLogURL: URL = {
+        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library", isDirectory: true)
+        return library
+            .appendingPathComponent("Logs", isDirectory: true)
+            .appendingPathComponent("MoveFolders", isDirectory: true)
+            .appendingPathComponent("overdrachten.log")
+    }()
     let logFormatter: DateFormatter = {
         let df = DateFormatter()
         df.dateFormat = "HH:mm:ss"
         return df
     }()
     let logFormatterQueue = DispatchQueue(label: "MoveFolders.logFormatter")
+    let transferLogFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return df
+    }()
+    let transferLogFormatterQueue = DispatchQueue(label: "MoveFolders.transferLogFormatter")
     let fileInfoFormatter: DateFormatter = {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -884,6 +903,7 @@ class Controller: NSObject, NSWindowDelegate {
 
         startCopyButton = makeButton("Overdracht beginnen", 820, 575, 220, 32, #selector(startCopy), mask: [.minXMargin, .minYMargin])
         debugButton = makeButton("Debug", 700, 575, 110, 32, #selector(toggleDebug), mask: [.minXMargin, .minYMargin])
+        transferLogButton = makeButton("Log", 640, 575, 55, 32, #selector(toggleTransferLog), mask: [.minXMargin, .minYMargin])
         updatesButton = makeButton("Updates", 580, 575, 110, 32, #selector(checkForUpdates), mask: [.minXMargin, .minYMargin])
         resumeButton = makeButton("Hervat", 480, 575, 90, 32, #selector(resumeLastTransfer))
         saveFavoriteButton = makeButton("Bewaar", 200, 575, 90, 32, #selector(saveCurrentFavorite))
@@ -1026,7 +1046,9 @@ class Controller: NSObject, NSWindowDelegate {
         toolbarX += 85 + buttonGap
         debugButton.frame = NSRect(x: toolbarX, y: topButtonY, width: 75, height: 32)
         toolbarX += 75 + buttonGap
-        startCopyButton.frame = NSRect(x: toolbarX, y: topButtonY, width: max(170, width - toolbarX - margin), height: 32)
+        transferLogButton.frame = NSRect(x: toolbarX, y: topButtonY, width: 55, height: 32)
+        toolbarX += 55 + buttonGap
+        startCopyButton.frame = NSRect(x: toolbarX, y: topButtonY, width: max(160, width - toolbarX - margin), height: 32)
 
         srcLabel.frame = NSRect(x: leftX, y: fieldY + 3, width: 50, height: 20)
         let srcIconX = leftX + columnWidth - (2 * iconSize) - 2
@@ -2409,6 +2431,7 @@ class Controller: NSObject, NSWindowDelegate {
     func runSyncProfile(_ profile: SyncProfile, manual: Bool) {
         defer { unmarkSyncProfileRunning(profile.id) }
         log("Sync start: \(profile.name) | \(profile.srcPath) -> \(profile.dstPath)")
+        recordTransferLog(status: "SYNC GESTART", relativePath: profile.name, detail: "Folder A: \(profile.srcPath) | Folder B: \(profile.dstPath)")
         let fm = FileManager.default
         let srcPath = normalizePath(profile.srcPath)
         let dstPath = normalizePath(profile.dstPath)
@@ -2438,13 +2461,31 @@ class Controller: NSObject, NSWindowDelegate {
         let countQueue = DispatchQueue(label: "MoveFolders.sync.count.\(profile.id)")
         var changed = 0
         var deleted = 0
+        var loggedSyncPaths: Set<String> = []
         let result = runCommandStreaming(cmd, timeout: nil, killGrace: commandKillGrace) { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             if trimmed.hasPrefix("*deleting") {
                 countQueue.sync { deleted += 1 }
+                if let path = self.syncProgressDetail(fromRsyncLine: trimmed) {
+                    let cleanPath = path.replacingOccurrences(of: "*deleting", with: "").trimmingCharacters(in: .whitespaces)
+                    let shouldLog = countQueue.sync { loggedSyncPaths.insert("delete:\(cleanPath)").inserted }
+                    if shouldLog {
+                        self.recordTransferLog(status: "SYNC VERWIJDERD", relativePath: cleanPath, dstBase: dstPath, detail: "profiel: \(profile.name)")
+                    }
+                }
             } else if trimmed.first == ">" || trimmed.first == "c" || trimmed.first == "." {
                 countQueue.sync { changed += 1 }
+                if let path = self.syncProgressDetail(fromRsyncLine: trimmed) {
+                    let sourcePath = (srcPath as NSString).appendingPathComponent(path)
+                    var isDirectory: ObjCBool = false
+                    if fm.fileExists(atPath: sourcePath, isDirectory: &isDirectory), !isDirectory.boolValue {
+                        let shouldLog = countQueue.sync { loggedSyncPaths.insert("copy:\(path)").inserted }
+                        if shouldLog {
+                            self.recordTransferLog(status: "SYNC OVERGEZET", relativePath: path, srcBase: srcPath, dstBase: dstPath, detail: "profiel: \(profile.name)")
+                        }
+                    }
+                }
             }
             if let metrics = self.rsyncProgressMetrics(from: trimmed) {
                 self.updateSyncProgress(profileId: profile.id, percent: metrics.percent, speed: metrics.speed, eta: metrics.eta)
@@ -2467,6 +2508,7 @@ class Controller: NSObject, NSWindowDelegate {
 
     func finishSyncProfile(_ profile: SyncProfile, success: Bool, status: String) {
         log("Sync klaar: \(profile.name) | \(status)")
+        recordTransferLog(status: success ? "SYNC KLAAR" : "SYNC MISLUKT", relativePath: profile.name, detail: status)
         finishSyncProgress(profileId: profile.id, profileName: profile.name, status: status, success: success)
         updateSyncProfile(id: profile.id) { item in
             item.lastRunAt = Date()
@@ -3351,6 +3393,9 @@ class Controller: NSObject, NSWindowDelegate {
                     let head = trimmed.split(separator: "\n").prefix(2).joined(separator: " | ")
                     log("Mismatch overwrite failed: \(d.relPath) (code \(lastExitCode)) | \(head)")
                 }
+                recordTransferLog(status: "NIET OVERGEZET", relativePath: d.relPath, srcBase: srcBase, dstBase: dstBase, detail: "mismatch overschrijven mislukt; rsync code \(lastExitCode)")
+            } else {
+                recordTransferLog(status: "OVERGEZET", relativePath: d.relPath, srcBase: srcBase, dstBase: dstBase, detail: "mismatch handmatig overschreven")
             }
         }
     }
@@ -3476,8 +3521,15 @@ class Controller: NSObject, NSWindowDelegate {
         let outcomeStatus: TransferStatus
         switch outcome {
         case .skip:
+            for detail in details where detail.canOverwrite {
+                recordTransferLog(status: "NIET OVERGEZET", relativePath: detail.relPath, srcBase: srcBase, dstBase: dstBase, detail: "mismatch door gebruiker overgeslagen")
+            }
             outcomeStatus = .warning("Mismatchs overgeslagen")
         case .overwrite(let selected):
+            let selectedPaths = Set(selected.map { $0.relPath })
+            for detail in details where detail.canOverwrite && !selectedPaths.contains(detail.relPath) {
+                recordTransferLog(status: "NIET OVERGEZET", relativePath: detail.relPath, srcBase: srcBase, dstBase: dstBase, detail: "mismatch niet geselecteerd voor overschrijven")
+            }
             overwriteMismatches(selected, srcBase: srcBase, dstBase: dstBase, mapName: items.first ?? "")
             outcomeStatus = .warning("Mismatchs overschreven")
         }
@@ -3642,6 +3694,56 @@ class Controller: NSObject, NSWindowDelegate {
     }
 
     func copySingleItem(name: String, srcBase: String, dstBase: String, index: Int, total: Int) -> CopyResult {
+        let transferredPathsQueue = DispatchQueue(label: "MoveFolders.copy.transferredPaths")
+        var transferredPaths: Set<String> = []
+
+        func registerTransferredPath(_ rawPath: String) {
+            var relativePath = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if relativePath.hasPrefix("./") { relativePath.removeFirst(2) }
+            while relativePath.hasPrefix("/") { relativePath.removeFirst() }
+            guard !relativePath.isEmpty, relativePath != ".", !relativePath.hasSuffix("/") else { return }
+
+            let sourcePath = (srcBase as NSString).appendingPathComponent(relativePath)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: sourcePath, isDirectory: &isDirectory), !isDirectory.boolValue else { return }
+            let inserted = transferredPathsQueue.sync { transferredPaths.insert(relativePath).inserted }
+            if inserted {
+                recordTransferLog(status: "OVERGEZET", relativePath: relativePath, srcBase: srcBase, dstBase: dstBase)
+            }
+        }
+
+        func logFilesNotTransferred(reason: String) {
+            let copied = transferredPathsQueue.sync { transferredPaths }
+            let sourceRoot = (srcBase as NSString).appendingPathComponent(name)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: sourceRoot, isDirectory: &isDirectory) else {
+                recordTransferLog(status: "NIET OVERGEZET", relativePath: name, srcBase: srcBase, dstBase: dstBase, detail: "bron niet meer bereikbaar; \(reason)")
+                return
+            }
+
+            if !isDirectory.boolValue {
+                if !copied.contains(name) {
+                    recordTransferLog(status: "NIET OVERGEZET", relativePath: name, srcBase: srcBase, dstBase: dstBase, detail: reason)
+                }
+                return
+            }
+
+            guard let enumerator = FileManager.default.enumerator(atPath: sourceRoot) else {
+                recordTransferLog(status: "NIET OVERGEZET", relativePath: name, srcBase: srcBase, dstBase: dstBase, detail: "bronmap kon niet voor het log worden gelezen; \(reason)")
+                return
+            }
+            for case let child as String in enumerator {
+                if child == ".DS_Store" || child.hasSuffix("/.DS_Store") { continue }
+                let fullPath = (sourceRoot as NSString).appendingPathComponent(child)
+                var childIsDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: fullPath, isDirectory: &childIsDirectory), !childIsDirectory.boolValue else { continue }
+                let relativePath = (name as NSString).appendingPathComponent(child)
+                if !copied.contains(relativePath) {
+                    recordTransferLog(status: "NIET OVERGEZET", relativePath: relativePath, srcBase: srcBase, dstBase: dstBase, detail: reason)
+                }
+            }
+        }
+
         func runAttempt(useInplace: Bool, includeXattrs: Bool, attempt: Int, maxAttempts: Int) -> (ok: Bool, exitCode: Int32, output: String, timedOut: Bool) {
             if self.isTransferCancelRequested() {
                 return (false, 130, "Geannuleerd door gebruiker", false)
@@ -3710,7 +3812,10 @@ class Controller: NSObject, NSWindowDelegate {
                         var logLine = trimmed
                         if logLine.hasPrefix(self.rsyncOutFormatMarker) {
                             let rel = String(logLine.dropFirst(self.rsyncOutFormatMarker.count)).trimmingCharacters(in: .whitespaces)
+                            registerTransferredPath(rel)
                             logLine = rel.isEmpty ? "bestandsupdate" : "bestandsupdate: \(rel)"
+                        } else if !self.rsyncConfig.supportsOutFormat {
+                            registerTransferredPath(logLine)
                         }
                         self.log("rsync: \(logLine)")
                     }
@@ -3746,6 +3851,15 @@ class Controller: NSObject, NSWindowDelegate {
 
             let timedOut = timeoutQueue.sync { didTimeout }
             let output = String(decoding: outputData, as: UTF8.self)
+            for outputLine in output.replacingOccurrences(of: "\r", with: "\n").split(separator: "\n") {
+                let trimmed = outputLine.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix(self.rsyncOutFormatMarker) {
+                    let rel = String(trimmed.dropFirst(self.rsyncOutFormatMarker.count)).trimmingCharacters(in: .whitespaces)
+                    registerTransferredPath(rel)
+                } else if !self.rsyncConfig.supportsOutFormat {
+                    registerTransferredPath(trimmed)
+                }
+            }
             if task.terminationStatus != 0 {
                 let extra = timedOut ? " (timeout)" : ""
                 self.log("rsync fout \(name): code \(task.terminationStatus)\(extra)")
@@ -3762,15 +3876,18 @@ class Controller: NSObject, NSWindowDelegate {
         for attempt in 1...maxAttempts {
             if isTransferCancelRequested() {
                 log("Kopie geannuleerd: \(name)")
+                logFilesNotTransferred(reason: "overdracht geannuleerd")
                 return .cancelled
             }
             let useInplace = attempt >= 2
             let result = runAttempt(useInplace: useInplace, includeXattrs: includeXattrs, attempt: attempt, maxAttempts: maxAttempts)
             if isTransferCancelRequested() {
                 log("Kopie geannuleerd tijdens rsync: \(name)")
+                logFilesNotTransferred(reason: "overdracht geannuleerd")
                 return .cancelled
             }
             if result.ok {
+                logFilesNotTransferred(reason: "rsync heeft het bestand overgeslagen; het was al gelijk of het doel was nieuwer")
                 return .success
             }
             finalOutput = result.output
@@ -3797,6 +3914,7 @@ class Controller: NSObject, NSWindowDelegate {
                 case .cancelTransfer:
                     log("Gebruiker annuleerde overdracht na xattr-permissiefout")
                     requestTransferCancellation()
+                    logFilesNotTransferred(reason: "overdracht geannuleerd na xattr-fout")
                     return .cancelled
                 }
             }
@@ -3818,6 +3936,7 @@ class Controller: NSObject, NSWindowDelegate {
                 warning += " Bronbestand gaf een leesfout op de netwerkschijf."
             }
             log("Kopie waarschuwing \(name): \(warning)")
+            logFilesNotTransferred(reason: "niet bevestigd als overgezet; rsync eindigde met waarschuwing code 23")
             return .warning(warning)
         }
 
@@ -3829,6 +3948,7 @@ class Controller: NSObject, NSWindowDelegate {
         }
         let failMsg = "Kopie mislukt (code \(finalExitCode)\(extra)\(hint))"
         log("Kopie fout \(name): \(failMsg)")
+        logFilesNotTransferred(reason: "niet bevestigd als overgezet; \(failMsg)")
         return .failed(failMsg)
     }
 
@@ -3898,6 +4018,11 @@ class Controller: NSObject, NSWindowDelegate {
         log("\(resumed ? "Hervat copy" : "Start copy"): \(items.joined(separator: ", "))")
         log("Instelling lege mappen overslaan: \(skipEmptyFoldersEnabled ? "aan" : "uit")")
         log("Instelling xattrs: \(copyXattrsEnabled ? "aan" : "uit")")
+        recordTransferLog(
+            status: resumed ? "OPDRACHT HERVAT" : "OPDRACHT GESTART",
+            relativePath: summary,
+            detail: "bronmap: \(srcPath) | doelmap: \(dstPath)"
+        )
         DispatchQueue.main.async {
             self.showProgress("Bezig met overdracht...", detail: summary)
             self.setPhase("Controle bron")
@@ -3976,6 +4101,7 @@ class Controller: NSObject, NSWindowDelegate {
                     }
                     if !hasFiles {
                         self.log("Lege map overgeslagen: \(name)")
+                        self.recordTransferLog(status: "OVERGESLAGEN", relativePath: name, srcBase: srcPath, dstBase: dstPath, detail: "lege map")
                         summaries.append(TransferSummary(name: name, status: .warning("Overgeslagen: lege map")))
                         persistResumeSnapshot(self.uniqueResumeItems(resumeItems + remainingItems(after: idx)), reason: activeResumeReason)
                         DispatchQueue.main.async {
@@ -4000,6 +4126,7 @@ class Controller: NSObject, NSWindowDelegate {
                 self.log("Doelstatus \(name): \(statusText)")
                 if dstStatus == .notDirectory {
                     let msg = "Doelpad bestaat al als bestand"
+                    self.recordTransferLog(status: "NIET OVERGEZET", relativePath: name, srcBase: srcPath, dstBase: dstPath, detail: msg)
                     summaries.append(TransferSummary(name: name, status: .failed(msg)))
                     resumeItems.append(name)
                     if resumeReason.isEmpty { resumeReason = msg }
@@ -4091,6 +4218,21 @@ class Controller: NSObject, NSWindowDelegate {
                 summaries.append(TransferSummary(name: "Overdracht", status: .warning("Geannuleerd door gebruiker")))
             }
             let uniqueResumeItems = self.uniqueResumeItems(resumeItems)
+            var okCount = 0
+            var warningCount = 0
+            var failedCount = 0
+            for summary in summaries {
+                switch summary.status {
+                case .success: okCount += 1
+                case .warning: warningCount += 1
+                case .failed: failedCount += 1
+                }
+            }
+            self.recordTransferLog(
+                status: didCancel ? "OPDRACHT GEANNULEERD" : "OPDRACHT KLAAR",
+                relativePath: items.joined(separator: ", "),
+                detail: "OK: \(okCount) | waarschuwingen: \(warningCount) | fouten: \(failedCount)"
+            )
             DispatchQueue.main.async {
                 if uniqueResumeItems.isEmpty {
                     self.storeResumeJob(nil)
@@ -4185,9 +4327,138 @@ class Controller: NSObject, NSWindowDelegate {
                 NSWorkspace.shared.open(URL(fileURLWithPath: dstPath))
             }
         case "showLog":
-            showDebugWindow()
+            showTransferLogWindow()
         default:
             break
+        }
+    }
+
+    func setupTransferLogWindow() {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 920, height: 480),
+                            styleMask: [.titled, .closable, .resizable],
+                            backing: .buffered,
+                            defer: false)
+        panel.title = "Overdrachtslog"
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.contentMinSize = NSSize(width: 620, height: 280)
+
+        let scroll = NSScrollView(frame: panel.contentView?.bounds ?? .zero)
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.drawsBackground = true
+        textView.backgroundColor = NSColor.textBackgroundColor
+        textView.textColor = NSColor.textColor
+        textView.string = recentTransferLogText()
+        scroll.documentView = textView
+        panel.contentView?.addSubview(scroll)
+
+        transferLogWindow = panel
+        transferLogTextView = textView
+        textView.scrollToEndOfDocument(nil)
+    }
+
+    func recentTransferLogText(maxBytes: UInt64 = 5 * 1024 * 1024) -> String {
+        return transferLogQueue.sync {
+            transferLogFileHandle?.synchronizeFile()
+            guard FileManager.default.fileExists(atPath: transferLogURL.path),
+                  let handle = try? FileHandle(forReadingFrom: transferLogURL) else {
+                return "Nog geen overdrachten gelogd.\n"
+            }
+            defer { handle.closeFile() }
+            let size = (try? FileManager.default.attributesOfItem(atPath: transferLogURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+            let start = size > maxBytes ? size - maxBytes : 0
+            handle.seek(toFileOffset: start)
+            let data = handle.readDataToEndOfFile()
+            var text = String(decoding: data, as: UTF8.self)
+            if start > 0, let newline = text.firstIndex(of: "\n") {
+                text = String(text[text.index(after: newline)...])
+                text = "— Alleen de laatste 5 MB wordt hier getoond; het volledige logbestand blijft bewaard. —\n" + text
+            }
+            return text.isEmpty ? "Nog geen overdrachten gelogd.\n" : text
+        }
+    }
+
+    func showTransferLogWindow() {
+        if transferLogWindow == nil {
+            setupTransferLogWindow()
+        } else {
+            transferLogTextView?.string = recentTransferLogText()
+            transferLogTextView?.scrollToEndOfDocument(nil)
+        }
+        transferLogWindow?.center()
+        transferLogWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func toggleTransferLog() {
+        guard let win = transferLogWindow else {
+            showTransferLogWindow()
+            return
+        }
+        if win.isVisible {
+            win.orderOut(nil)
+        } else {
+            showTransferLogWindow()
+        }
+    }
+
+    func recordTransferLog(status: String, relativePath: String, srcBase: String? = nil, dstBase: String? = nil, detail: String? = nil) {
+        let timestamp = transferLogFormatterQueue.sync { transferLogFormatter.string(from: Date()) }
+        let cleanPath = relativePath.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        var parts = ["[\(timestamp)]", status, cleanPath]
+        if let srcBase = srcBase, !srcBase.isEmpty {
+            parts.append("bron: \((srcBase as NSString).appendingPathComponent(cleanPath))")
+        }
+        if let dstBase = dstBase, !dstBase.isEmpty {
+            parts.append("doel: \((dstBase as NSString).appendingPathComponent(cleanPath))")
+        }
+        if let detail = detail, !detail.isEmpty {
+            parts.append(detail.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " "))
+        }
+        let line = parts.joined(separator: " | ") + "\n"
+
+        transferLogQueue.async {
+            do {
+                let directory = self.transferLogURL.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: self.transferLogURL.path) {
+                    FileManager.default.createFile(atPath: self.transferLogURL.path, contents: nil)
+                }
+                if self.transferLogFileHandle == nil {
+                    self.transferLogFileHandle = try FileHandle(forWritingTo: self.transferLogURL)
+                    self.transferLogFileHandle?.seekToEndOfFile()
+                }
+                if let data = line.data(using: .utf8) {
+                    self.transferLogFileHandle?.write(data)
+                }
+            } catch {
+                print("MoveFolders overdrachtslog kon niet worden geschreven: \(error.localizedDescription)")
+            }
+
+            DispatchQueue.main.async {
+                guard self.transferLogWindow?.isVisible == true,
+                      let textView = self.transferLogTextView,
+                      let storage = textView.textStorage else { return }
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .foregroundColor: NSColor.textColor,
+                    .font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+                ]
+                storage.append(NSAttributedString(string: line, attributes: attrs))
+                textView.scrollToEndOfDocument(nil)
+            }
         }
     }
 
