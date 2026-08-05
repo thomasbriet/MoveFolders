@@ -2437,13 +2437,16 @@ class Controller: NSObject, NSWindowDelegate {
         let dstPath = normalizePath(profile.dstPath)
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: srcPath, isDirectory: &isDir), isDir.boolValue else {
-            finishSyncProfile(profile, success: false, status: "Bron niet bereikbaar")
+            finishSyncProfile(profile, success: false, status: "Folder A bestaat niet of is niet gekoppeld: \(srcPath)")
             return
         }
-        do {
-            try fm.createDirectory(atPath: dstPath, withIntermediateDirectories: true)
-        } catch {
-            finishSyncProfile(profile, success: false, status: "Doel niet bereikbaar: \(error.localizedDescription)")
+        var dstIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: dstPath, isDirectory: &dstIsDir), dstIsDir.boolValue else {
+            finishSyncProfile(profile, success: false, status: "Folder B bestaat niet of is niet gekoppeld: \(dstPath)")
+            return
+        }
+        guard fm.isWritableFile(atPath: dstPath) else {
+            finishSyncProfile(profile, success: false, status: "Geen schrijfrechten op Folder B: \(dstPath)")
             return
         }
 

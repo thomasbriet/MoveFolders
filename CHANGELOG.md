@@ -2,6 +2,14 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.6] - 2026-08-05
+
+### Gewijzigd
+
+- Sync-profielen maken Folder B niet meer automatisch aan; Folder A en Folder B moeten beide bestaande mappen zijn.
+- Alleen de inhoud van Folder A wordt met de inhoud van Folder B gesynchroniseerd.
+- Ontbrekende, niet gekoppelde of niet beschrijfbare doelmappen geven nu een gerichte foutmelding.
+
 ## [0.8.5] - 2026-08-04
 
 ### Toegevoegd
