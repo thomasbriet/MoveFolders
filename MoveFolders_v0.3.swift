@@ -420,7 +420,7 @@ class Controller: NSObject, NSWindowDelegate {
         return fallback
     }
 
-    func rsyncFlags(includeUpdate: Bool = false, includePartial: Bool = false, includeInplace: Bool = false, includeDryRun: Bool = false, includeItemize: Bool = false, includeProgress: Bool = false, includePerFileProgress: Bool = false, includeStats: Bool = false, includeXattrs: Bool = true, includeDelete: Bool = false, outFormatMarker: String? = nil) -> String {
+    func rsyncFlags(includeUpdate: Bool = false, includePartial: Bool = false, includeInplace: Bool = false, includeDryRun: Bool = false, includeItemize: Bool = false, includeProgress: Bool = false, includePerFileProgress: Bool = false, includeStats: Bool = false, includeXattrs: Bool = true, includePermissions: Bool = true, includeDelete: Bool = false, outFormatMarker: String? = nil) -> String {
         var flags: [String] = ["-ah", "--modify-window=2", "--exclude '.DS_Store'"]
         let cfg = rsyncConfig
 
@@ -430,6 +430,7 @@ class Controller: NSObject, NSWindowDelegate {
         if includeInplace { flags.append("--inplace") }
         if includeItemize { flags.append("--itemize-changes") }
         if includeDelete { flags.append("--delete") }
+        if !includePermissions { flags.append("--no-perms") }
         if cfg.supportsNoGroup { flags.append("--no-group") }
         if cfg.supportsNoOwner { flags.append("--no-owner") }
         if cfg.supportsProtectArgs { flags.append("--protect-args") }
@@ -2414,6 +2415,31 @@ class Controller: NSObject, NSWindowDelegate {
         return candidate.isEmpty ? nil : candidate
     }
 
+    func syncItemizedEntry(from line: String) -> (code: String, path: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard parts.count == 2 else { return nil }
+        let code = String(parts[0])
+        let codeCharacters = Array(code)
+        guard codeCharacters.count >= 2,
+              codeCharacters[0] == ">" || codeCharacters[0] == "<" || codeCharacters[0] == "c" || codeCharacters[0] == "h" || codeCharacters[0] == "." else { return nil }
+        var path = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        if path.hasPrefix("./") { path.removeFirst(2) }
+        guard !path.isEmpty else { return nil }
+        return (code, path)
+    }
+
+    func syncItemizedEntryTransfersContent(_ code: String) -> Bool {
+        let characters = Array(code)
+        guard characters.count >= 2, characters[1] != "d" else { return false }
+        return characters[0] == ">" || characters[0] == "<" || characters[0] == "c" || characters[0] == "h"
+    }
+
+    func syncItemizedEntryIsMetadataOnly(_ code: String) -> Bool {
+        let characters = Array(code)
+        return characters.count >= 2 && characters[0] == "." && characters[1] != "d"
+    }
+
     func startSyncRun(profile: SyncProfile, manual: Bool) {
         guard markSyncProfileRunning(profile.id) else {
             if manual { alert("Dit sync-profiel draait al.") }
@@ -2458,12 +2484,14 @@ class Controller: NSObject, NSWindowDelegate {
             includeProgress: true,
             includeStats: true,
             includeXattrs: profile.copyXattrs,
+            includePermissions: false,
             includeDelete: profile.deleteExtra
         )
         let cmd = "\(shellQuote(rsyncPath)) \(flags) \(shellQuote(srcArg)) \(shellQuote(dstArg))"
         let countQueue = DispatchQueue(label: "MoveFolders.sync.count.\(profile.id)")
-        var changed = 0
+        var transferred = 0
         var deleted = 0
+        var metadataOnly = 0
         var loggedSyncPaths: Set<String> = []
         let result = runCommandStreaming(cmd, timeout: nil, killGrace: commandKillGrace) { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2477,16 +2505,18 @@ class Controller: NSObject, NSWindowDelegate {
                         self.recordTransferLog(status: "SYNC VERWIJDERD", relativePath: cleanPath, dstBase: dstPath, detail: "profiel: \(profile.name)")
                     }
                 }
-            } else if trimmed.first == ">" || trimmed.first == "c" || trimmed.first == "." {
-                countQueue.sync { changed += 1 }
-                if let path = self.syncProgressDetail(fromRsyncLine: trimmed) {
-                    let sourcePath = (srcPath as NSString).appendingPathComponent(path)
-                    var isDirectory: ObjCBool = false
-                    if fm.fileExists(atPath: sourcePath, isDirectory: &isDirectory), !isDirectory.boolValue {
-                        let shouldLog = countQueue.sync { loggedSyncPaths.insert("copy:\(path)").inserted }
-                        if shouldLog {
-                            self.recordTransferLog(status: "SYNC OVERGEZET", relativePath: path, srcBase: srcPath, dstBase: dstPath, detail: "profiel: \(profile.name)")
-                        }
+            } else if let entry = self.syncItemizedEntry(from: trimmed) {
+                if self.syncItemizedEntryTransfersContent(entry.code) {
+                    countQueue.sync { transferred += 1 }
+                    let shouldLog = countQueue.sync { loggedSyncPaths.insert("copy:\(entry.path)").inserted }
+                    if shouldLog {
+                        self.recordTransferLog(status: "SYNC OVERGEZET", relativePath: entry.path, srcBase: srcPath, dstBase: dstPath, detail: "profiel: \(profile.name) | rsync: \(entry.code)")
+                    }
+                } else if self.syncItemizedEntryIsMetadataOnly(entry.code) {
+                    countQueue.sync { metadataOnly += 1 }
+                    let shouldLog = countQueue.sync { loggedSyncPaths.insert("metadata:\(entry.path)").inserted }
+                    if shouldLog {
+                        self.recordTransferLog(status: "SYNC NIET OVERGEZET", relativePath: entry.path, srcBase: srcPath, dstBase: dstPath, detail: "inhoud was al gelijk; alleen metadata/attributen weken af | rsync: \(entry.code)")
                     }
                 }
             }
@@ -2498,10 +2528,11 @@ class Controller: NSObject, NSWindowDelegate {
             }
             self.log("Sync \(profile.name): \(trimmed)")
         }
-        let counts = countQueue.sync { (changed, deleted) }
+        let counts = countQueue.sync { (transferred, deleted, metadataOnly) }
         if result.exitCode == 0 && result.timedOut == false {
-            var status = counts.0 == 0 && counts.1 == 0 ? "OK: niets te syncen" : "OK: \(counts.0) wijzigingen"
+            var status = counts.0 == 0 && counts.1 == 0 ? "OK: niets overgezet" : "OK: \(counts.0) bestanden overgezet"
             if counts.1 > 0 { status += ", \(counts.1) verwijderd" }
+            if counts.2 > 0 { status += " | \(counts.2) alleen metadata/attributen (inhoud overgeslagen)" }
             finishSyncProfile(profile, success: true, status: status)
         } else {
             let timeoutText = result.timedOut ? " timeout" : ""

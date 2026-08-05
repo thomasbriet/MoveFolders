@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.7] - 2026-08-05
+
+### Opgelost
+
+- Sync telt bestanden met uitsluitend metadata-, permissie- of xattrverschillen niet meer als overgezette bestanden.
+- Het overdrachtslog gebruikt voor zulke bestanden `SYNC NIET OVERGEZET` en vermeldt de rsync-itemcode.
+- De eindstatus maakt nu onderscheid tussen werkelijk overgezette bestanden, verwijderde bestanden en bestanden waarvan alleen metadata afweek.
+
+### Gewijzigd
+
+- Sync-profielen proberen geen POSIX-bestandspermissies meer naar SMB-doelen te kopiëren; inhoud, timestamps en de gekozen xattrs blijven wel volgens het profiel gesynchroniseerd.
+
 ## [0.8.6] - 2026-08-05
 
 ### Gewijzigd
