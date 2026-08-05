@@ -9,14 +9,14 @@ Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.8.7
+./scripts/build_release.sh 0.8.8
 ```
 
 Dit maakt lokaal:
 
 - `MoveFolders.app`
-- `MoveFolders_v0.8.7_share.zip`
-- `MoveFolders_v0.8.7_installer.pkg`
+- `MoveFolders_v0.8.8_share.zip`
+- `MoveFolders_v0.8.8_installer.pkg`
 
 ## Updates
 

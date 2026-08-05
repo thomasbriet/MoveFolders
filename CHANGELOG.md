@@ -2,6 +2,17 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.8] - 2026-08-05
+
+### Opgelost
+
+- Het hoofdvenster komt na minimaliseren weer terug via een klik op het Dock-icoon of via Cmd+Tab.
+- Een gesloten hoofdvenster kan opnieuw worden geopend zolang MoveFolders nog draait.
+
+### Toegevoegd
+
+- Standaard macOS-app- en venstermenu's met `Toon MoveFolders` (`Cmd+0`), `Minimaliseer` en `Breng alles naar voren`.
+
 ## [0.8.7] - 2026-08-05
 
 ### Opgelost

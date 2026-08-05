@@ -351,7 +351,7 @@ class MismatchWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-class Controller: NSObject, NSWindowDelegate {
+class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     let defaultServer = "/Volumes/Archief/Artikelen-werkbestanden"
     let defaultLocal = "/Volumes/999 Games/01_Games"
     let updateGitHubOwner = "thomasbriet"
@@ -740,10 +740,12 @@ class Controller: NSObject, NSWindowDelegate {
     func run() {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        app.delegate = self
+        setupApplicationMenu(app)
         setAppIcon()
 
         let frame = NSRect(x: 0, y: 0, width: 1100, height: 600)
-        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.minSize = NSSize(width: 980, height: 560)
         window.contentMinSize = NSSize(width: 980, height: 540)
         window.delegate = self
@@ -991,6 +993,65 @@ class Controller: NSObject, NSWindowDelegate {
         startSyncScheduler()
 
         app.run()
+    }
+
+    func setupApplicationMenu(_ app: NSApplication) {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu(title: "MoveFolders")
+        appMenuItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Over MoveFolders", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        let showItem = NSMenuItem(title: "Toon MoveFolders", action: #selector(showMainWindow(_:)), keyEquivalent: "0")
+        showItem.target = self
+        appMenu.addItem(showItem)
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Verberg MoveFolders", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = NSMenuItem(title: "Verberg andere", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(withTitle: "Toon alles", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Stop MoveFolders", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Venster")
+        windowMenuItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "Minimaliseer", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        let showWindowItem = NSMenuItem(title: "Toon MoveFolders", action: #selector(showMainWindow(_:)), keyEquivalent: "0")
+        showWindowItem.target = self
+        windowMenu.addItem(showWindowItem)
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(withTitle: "Breng alles naar voren", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+
+        app.mainMenu = mainMenu
+        app.windowsMenu = windowMenu
+    }
+
+    @objc func showMainWindow(_ sender: Any?) {
+        restoreMainWindow()
+    }
+
+    func restoreMainWindow() {
+        guard window != nil else { return }
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        restoreMainWindow()
+        return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard window != nil, window.isMiniaturized || !window.isVisible else { return }
+        restoreMainWindow()
     }
 
     func windowDidResize(_ notification: Notification) {
