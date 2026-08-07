@@ -7,15 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example 0.8.9"
+        description: "Release version, for example 0.9"
         required: true
         type: string
 
 permissions:
   contents: write
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-release:
@@ -23,7 +20,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve version
         id: version

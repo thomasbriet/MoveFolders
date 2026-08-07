@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.8.9}"
+VERSION="${1:-0.9}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -17,7 +17,7 @@ PKG_SCRIPTS_DIR=".build/pkg-scripts"
 
 rm -rf "$APP_DIR" "${APP_NAME}.bin" "${ARTIFACT_NAME}.bin" "${ARTIFACT_NAME}_installer.pkg" "${ARTIFACT_NAME}_share.zip" "$PKG_SCRIPTS_DIR"
 
-swiftc "$SOURCE" -o "${ARTIFACT_NAME}.bin" -framework AppKit -framework Foundation
+swiftc -target arm64-apple-macosx11.0 "$SOURCE" -o "${ARTIFACT_NAME}.bin" -framework AppKit -framework Foundation -framework ServiceManagement
 
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "${ARTIFACT_NAME}.bin" "$APP_DIR/Contents/MacOS/$EXECUTABLE"
@@ -33,7 +33,7 @@ cp "$BASE_ICON" "$APP_DIR/Contents/Resources/${APP_NAME}.icns"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $VERSION" "$APP_DIR/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 10.13" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 11.0" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :NSHighResolutionCapable bool true" "$APP_DIR/Contents/Info.plist"
 
 find "$APP_DIR" -name '._*' -type f -delete

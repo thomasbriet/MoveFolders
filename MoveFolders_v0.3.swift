@@ -1,5 +1,6 @@
 import Cocoa
 import Darwin
+import ServiceManagement
 
 class TableAdapter: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     struct Item {
@@ -351,7 +352,7 @@ class MismatchWindowController: NSObject, NSWindowDelegate {
     }
 }
 
-class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
+class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDelegate {
     let defaultServer = "/Volumes/Archief/Artikelen-werkbestanden"
     let defaultLocal = "/Volumes/999 Games/01_Games"
     let updateGitHubOwner = "thomasbriet"
@@ -464,6 +465,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     }
 
     var window: NSWindow!
+    var settingsWindow: NSPanel?
+    var launchAtLoginCheckbox: NSButton?
+    var launchAtLoginStatusLabel: NSTextField?
+    var openLoginItemsSettingsButton: NSButton?
+    var startHiddenCheckbox: NSButton?
+    var statusItem: NSStatusItem?
     var tabView: NSTabView!
     var moveTabContent: NSView!
     var syncTabContent: NSView!
@@ -569,6 +576,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     var syncProfiles: [SyncProfile] = []
     var syncRunningProfileIds: Set<String> = []
     var syncReconnectLastAttempt: [String: Date] = [:]
+    var automaticSyncsPaused = false
+    var startHiddenInMenuBar = false
+    var mainFolderListsLoaded = false
     var syncTimer: DispatchSourceTimer?
     var selectedSyncProfileId: String?
     var syncProgressStates: [String: SyncProgressState] = [:]
@@ -580,6 +590,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     let favoritePresetsDefaultsKey = "favoriteTransferPresets"
     let resumeJobDefaultsKey = "lastResumeJob"
     let syncProfilesDefaultsKey = "syncProfiles"
+    let automaticSyncsPausedDefaultsKey = "automaticSyncsPaused"
+    let startHiddenInMenuBarDefaultsKey = "startHiddenInMenuBar"
     let recentSourceLimit = 5
     let favoritePresetLimit = 20
     let resumeStateQueue = DispatchQueue(label: "MoveFolders.resumeState")
@@ -752,7 +764,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
 
     func run() {
         let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        startHiddenInMenuBar = recentSourceDefaults.bool(forKey: startHiddenInMenuBarDefaultsKey)
+        automaticSyncsPaused = recentSourceDefaults.bool(forKey: automaticSyncsPausedDefaultsKey)
+        app.setActivationPolicy(startHiddenInMenuBar ? .accessory : .regular)
         app.delegate = self
         setupApplicationMenu(app)
         setAppIcon()
@@ -994,15 +1008,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         renderSyncProgress(for: selectedSyncProfile())
         updateResumeButton()
         layoutMainWindow()
+        setupStatusItem()
 
-        window.makeKeyAndOrderFront(nil)
         setupDebugWindow()
-        log("App gestart")
-        app.activate(ignoringOtherApps: true)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.refreshSrc()
-            self.refreshDst()
+        if startHiddenInMenuBar {
+            window.orderOut(nil)
+            log("App gestart in menubalkmodus")
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            log("App gestart")
+            app.activate(ignoringOtherApps: true)
+            loadMainFolderListsIfNeeded()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             self.schedulePendingDeleteCleanup(basePath: self.srcField.stringValue)
@@ -1024,6 +1040,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         let showItem = NSMenuItem(title: "Toon MoveFolders", action: #selector(showMainWindow(_:)), keyEquivalent: "0")
         showItem.target = self
         appMenu.addItem(showItem)
+        let settingsItem = NSMenuItem(title: "Instellingen…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Verberg MoveFolders", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = NSMenuItem(title: "Verberg andere", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -1054,6 +1073,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
 
     func restoreMainWindow() {
         guard window != nil else { return }
+        loadMainFolderListsIfNeeded()
         if window.isMiniaturized {
             window.deminiaturize(nil)
         }
@@ -1067,8 +1087,346 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        guard window != nil, window.isMiniaturized || !window.isVisible else { return }
+        refreshLoginItemSettingsUI()
+        guard window != nil, window.isMiniaturized else { return }
         restoreMainWindow()
+    }
+
+    func loadMainFolderListsIfNeeded() {
+        guard !mainFolderListsLoaded else { return }
+        mainFolderListsLoaded = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.refreshSrc()
+            self.refreshDst()
+        }
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            setupSettingsWindow()
+        }
+        refreshLoginItemSettingsUI()
+        settingsWindow?.center()
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func setupSettingsWindow() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Instellingen"
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        let content = panel.contentView!
+
+        let title = NSTextField(labelWithString: "Automatisch starten en achtergrondmodus")
+        title.frame = NSRect(x: 24, y: 248, width: 550, height: 24)
+        title.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+        content.addSubview(title)
+
+        let loginCheckbox = NSButton(checkboxWithTitle: "Start MoveFolders bij inloggen", target: self, action: #selector(toggleLaunchAtLogin(_:)))
+        loginCheckbox.frame = NSRect(x: 24, y: 204, width: 320, height: 24)
+        content.addSubview(loginCheckbox)
+        launchAtLoginCheckbox = loginCheckbox
+
+        let loginStatus = NSTextField(wrappingLabelWithString: "Status wordt geladen…")
+        loginStatus.frame = NSRect(x: 44, y: 158, width: 520, height: 44)
+        loginStatus.textColor = .secondaryLabelColor
+        content.addSubview(loginStatus)
+        launchAtLoginStatusLabel = loginStatus
+
+        let openSettingsButton = NSButton(frame: NSRect(x: 370, y: 202, width: 205, height: 28))
+        openSettingsButton.title = "Open inloginstellingen"
+        openSettingsButton.bezelStyle = .rounded
+        openSettingsButton.target = self
+        openSettingsButton.action = #selector(openLoginItemsSettings(_:))
+        content.addSubview(openSettingsButton)
+        openLoginItemsSettingsButton = openSettingsButton
+
+        let separator = NSBox(frame: NSRect(x: 24, y: 140, width: 552, height: 1))
+        separator.boxType = .separator
+        content.addSubview(separator)
+
+        let hiddenCheckbox = NSButton(checkboxWithTitle: "Start zonder hoofdvenster in de menubalk", target: self, action: #selector(toggleStartHiddenInMenuBar(_:)))
+        hiddenCheckbox.frame = NSRect(x: 24, y: 100, width: 420, height: 24)
+        hiddenCheckbox.state = startHiddenInMenuBar ? .on : .off
+        content.addSubview(hiddenCheckbox)
+        startHiddenCheckbox = hiddenCheckbox
+
+        let hiddenInfo = NSTextField(wrappingLabelWithString: "De menubalk blijft beschikbaar voor status, Sync nu, pauzeren, het log en het openen of afsluiten van MoveFolders. Deze keuze geldt volledig vanaf de volgende start.")
+        hiddenInfo.frame = NSRect(x: 44, y: 50, width: 520, height: 44)
+        hiddenInfo.textColor = .secondaryLabelColor
+        content.addSubview(hiddenInfo)
+
+        let doneButton = NSButton(frame: NSRect(x: 480, y: 14, width: 96, height: 28))
+        doneButton.title = "Gereed"
+        doneButton.bezelStyle = .rounded
+        doneButton.target = self
+        doneButton.action = #selector(closeSettings(_:))
+        doneButton.keyEquivalent = "\r"
+        content.addSubview(doneButton)
+
+        settingsWindow = panel
+        refreshLoginItemSettingsUI()
+    }
+
+    func refreshLoginItemSettingsUI() {
+        guard let checkbox = launchAtLoginCheckbox,
+              let statusLabel = launchAtLoginStatusLabel else { return }
+        startHiddenCheckbox?.state = startHiddenInMenuBar ? .on : .off
+        if #available(macOS 13.0, *) {
+            let status = SMAppService.mainApp.status
+            checkbox.isEnabled = true
+            openLoginItemsSettingsButton?.isEnabled = true
+            switch status {
+            case .enabled:
+                checkbox.state = .on
+                statusLabel.stringValue = "Ingeschakeld. macOS start MoveFolders bij de volgende aanmelding."
+            case .requiresApproval:
+                checkbox.state = .on
+                statusLabel.stringValue = "Goedkeuring nodig. Sta MoveFolders toe bij Systeeminstellingen → Algemeen → Inloggen en extensies."
+            case .notRegistered:
+                checkbox.state = .off
+                statusLabel.stringValue = "Uitgeschakeld. MoveFolders start niet automatisch bij het inloggen."
+            case .notFound:
+                checkbox.state = .off
+                statusLabel.stringValue = "De loginservice kon deze app niet vinden. Installeer MoveFolders in de map Programma’s en probeer opnieuw."
+            @unknown default:
+                checkbox.state = .off
+                statusLabel.stringValue = "De status van automatisch starten is onbekend."
+            }
+        } else {
+            checkbox.state = .off
+            checkbox.isEnabled = false
+            openLoginItemsSettingsButton?.isEnabled = false
+            statusLabel.stringValue = "Automatisch starten via MoveFolders vereist macOS 13 of nieuwer."
+        }
+    }
+
+    @objc func toggleLaunchAtLogin(_ sender: NSButton) {
+        guard #available(macOS 13.0, *) else {
+            refreshLoginItemSettingsUI()
+            return
+        }
+        sender.isEnabled = false
+        let service = SMAppService.mainApp
+        do {
+            if sender.state == .on {
+                if service.status != .enabled && service.status != .requiresApproval {
+                    try service.register()
+                }
+            } else if service.status != .notRegistered {
+                try service.unregister()
+            }
+            refreshLoginItemSettingsUI()
+            if sender.state == .on && service.status == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+                alert("macOS vraagt nog om toestemming. Schakel MoveFolders in bij ‘Open bij inloggen’ in Systeeminstellingen.")
+            } else {
+                log("Automatisch starten bij inloggen: \(sender.state == .on ? "aan" : "uit")")
+            }
+        } catch {
+            refreshLoginItemSettingsUI()
+            if sender.state == .on && service.status == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+                alert("macOS vraagt nog om toestemming. Schakel MoveFolders in bij ‘Open bij inloggen’ in Systeeminstellingen.")
+            } else {
+                alert("Automatisch starten kon niet worden aangepast:\n\(error.localizedDescription)\n\nControleer of MoveFolders in de map Programma’s staat.")
+            }
+        }
+        sender.isEnabled = true
+    }
+
+    @objc func openLoginItemsSettings(_ sender: Any?) {
+        guard #available(macOS 13.0, *) else { return }
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+    @objc func toggleStartHiddenInMenuBar(_ sender: NSButton) {
+        startHiddenInMenuBar = sender.state == .on
+        recentSourceDefaults.set(startHiddenInMenuBar, forKey: startHiddenInMenuBarDefaultsKey)
+        recentSourceDefaults.synchronize()
+        _ = NSApplication.shared.setActivationPolicy(startHiddenInMenuBar ? .accessory : .regular)
+        log("Starten in menubalkmodus: \(startHiddenInMenuBar ? "aan" : "uit")")
+        updateStatusItemAppearance()
+    }
+
+    @objc func closeSettings(_ sender: Any?) {
+        settingsWindow?.orderOut(nil)
+    }
+
+    func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.autosaveName = "MoveFolders.statusItem"
+        let menu = NSMenu(title: "MoveFolders")
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+        updateStatusItemAppearance()
+        rebuildStatusItemMenu()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else { return }
+        rebuildStatusItemMenu()
+    }
+
+    func automaticSyncsArePaused() -> Bool {
+        syncStateQueue.sync { automaticSyncsPaused }
+    }
+
+    func syncStatusMenuSummary() -> String {
+        let state = syncStateQueue.sync { (automaticSyncsPaused, syncRunningProfileIds) }
+        let transferActive = progressWindow != nil
+        if transferActive && !state.1.isEmpty {
+            return "Overdracht en \(state.1.count) sync(s) bezig"
+        }
+        if transferActive { return "Overdracht bezig" }
+        if !state.1.isEmpty { return "\(state.1.count) sync(s) bezig" }
+        if state.0 { return "Automatische syncs gepauzeerd" }
+        let enabled = syncProfiles.filter { $0.enabled }
+        if enabled.isEmpty { return "Geen automatische syncprofielen actief" }
+        let waiting = enabled.filter { $0.lastStatus.hasPrefix("Wacht op") }.count
+        return waiting > 0
+            ? "\(enabled.count) actief, \(waiting) wacht op verbinding"
+            : "\(enabled.count) automatische sync(s) actief"
+    }
+
+    func compactMenuText(_ text: String, limit: Int = 72) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(max(1, limit - 1))) + "…"
+    }
+
+    func rebuildStatusItemMenu() {
+        guard let menu = statusItem?.menu else { return }
+        menu.removeAllItems()
+
+        let status = NSMenuItem(title: "Status: \(syncStatusMenuSummary())", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+
+        let profileStatusItem = NSMenuItem(title: "Syncstatus", action: nil, keyEquivalent: "")
+        let profileStatusMenu = NSMenu(title: "Syncstatus")
+        let runningIds = syncStateQueue.sync { syncRunningProfileIds }
+        if syncProfiles.isEmpty {
+            let empty = NSMenuItem(title: "Geen syncprofielen", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            profileStatusMenu.addItem(empty)
+        } else {
+            for profile in syncProfiles {
+                let prefix = runningIds.contains(profile.id) ? "Bezig" : (profile.enabled ? "Aan" : "Uit")
+                let title = compactMenuText("\(prefix): \(profile.name) — \(profile.lastStatus)")
+                let row = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                row.isEnabled = false
+                profileStatusMenu.addItem(row)
+            }
+        }
+        profileStatusItem.submenu = profileStatusMenu
+        menu.addItem(profileStatusItem)
+        menu.addItem(.separator())
+
+        let open = NSMenuItem(title: "Open MoveFolders", action: #selector(showMainWindow(_:)), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+
+        let syncNowItem = NSMenuItem(title: "Sync nu", action: nil, keyEquivalent: "")
+        let syncNowMenu = NSMenu(title: "Sync nu")
+        if syncProfiles.isEmpty {
+            let empty = NSMenuItem(title: "Geen syncprofielen", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            syncNowMenu.addItem(empty)
+        } else {
+            for profile in syncProfiles {
+                let row = NSMenuItem(title: profile.name, action: #selector(runSyncFromStatusMenu(_:)), keyEquivalent: "")
+                row.target = self
+                row.representedObject = profile.id
+                row.isEnabled = !runningIds.contains(profile.id)
+                syncNowMenu.addItem(row)
+            }
+        }
+        syncNowItem.submenu = syncNowMenu
+        menu.addItem(syncNowItem)
+
+        let paused = automaticSyncsArePaused()
+        let pause = NSMenuItem(
+            title: paused ? "Automatische syncs hervatten" : "Automatische syncs pauzeren",
+            action: #selector(toggleAutomaticSyncPause(_:)),
+            keyEquivalent: ""
+        )
+        pause.target = self
+        menu.addItem(pause)
+        menu.addItem(.separator())
+
+        let logItem = NSMenuItem(title: "Log openen", action: #selector(openTransferLogFromStatusItem(_:)), keyEquivalent: "")
+        logItem.target = self
+        menu.addItem(logItem)
+        let settings = NSMenuItem(title: "Instellingen…", action: #selector(showSettings(_:)), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Stop MoveFolders", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        quit.target = NSApplication.shared
+        menu.addItem(quit)
+    }
+
+    func updateStatusItemAppearance() {
+        guard let button = statusItem?.button else { return }
+        let state = syncStateQueue.sync { (automaticSyncsPaused, !syncRunningProfileIds.isEmpty) }
+        if #available(macOS 11.0, *) {
+            let symbolName = state.0 ? "pause.circle.fill" : (state.1 || progressWindow != nil ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath")
+            let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MoveFolders")
+            image?.isTemplate = true
+            button.image = image
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = state.0 ? "MFⅡ" : "MF"
+        }
+        button.toolTip = "MoveFolders — \(syncStatusMenuSummary())"
+    }
+
+    func refreshStatusItemAppearance() {
+        DispatchQueue.main.async {
+            self.updateStatusItemAppearance()
+        }
+    }
+
+    @objc func runSyncFromStatusMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let profile = syncProfiles.first(where: { $0.id == id }) else { return }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        requestImmediateSync(profile)
+    }
+
+    @objc func toggleAutomaticSyncPause(_ sender: Any?) {
+        let paused = syncStateQueue.sync { () -> Bool in
+            automaticSyncsPaused.toggle()
+            return automaticSyncsPaused
+        }
+        recentSourceDefaults.set(paused, forKey: automaticSyncsPausedDefaultsKey)
+        recentSourceDefaults.synchronize()
+        log("Automatische syncs: \(paused ? "gepauzeerd" : "hervat")")
+        recordTransferLog(
+            status: paused ? "AUTOMATISCHE SYNCS GEPAUZEERD" : "AUTOMATISCHE SYNCS HERVAT",
+            relativePath: "Alle syncprofielen",
+            detail: paused ? "Lopende syncs worden nog afgerond." : "De scheduler is weer actief."
+        )
+        updateStatusItemAppearance()
+        updateSyncStatusLabel(profile: selectedSyncProfile())
+        if !paused {
+            DispatchQueue.global(qos: .utility).async {
+                self.tickSyncProfiles()
+            }
+        }
+    }
+
+    @objc func openTransferLogFromStatusItem(_ sender: Any?) {
+        showTransferLogWindow()
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -1429,6 +1787,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
             alert("Selecteer eerst een sync-profiel.")
             return
         }
+        requestImmediateSync(selectedProfile)
+    }
+
+    func requestImmediateSync(_ selectedProfile: SyncProfile) {
         let profile = resolveAndCaptureNetworkPaths(for: selectedProfile)
         guard syncProfilePathsAvailable(profile) else {
             let status = syncWaitingStatus(for: profile)
@@ -1527,6 +1889,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         self.isCopying = false
         self.updateProgressBars()
         self.progressWindow = panel
+        self.updateStatusItemAppearance()
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         log("Progress gestart: \(message) | \(detail)")
@@ -1568,6 +1931,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         progressTaskOrder = []
         progressTaskFileTotals = [:]
         progressOverallFileTotal = nil
+        updateStatusItemAppearance()
         log("Progress gesloten")
     }
 
@@ -1830,6 +2194,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     func updateProgressTask(index: Int, total: Int, name: String) {
         DispatchQueue.main.async {
             self.isCopying = true
+            self.updateStatusItemAppearance()
             self.progressTaskIndex = index
             self.progressTaskTotal = total
             self.progressTaskName = name
@@ -2252,6 +2617,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
             recentSourceDefaults.synchronize()
         }
         refreshSyncProfileMenu()
+        refreshStatusItemAppearance()
     }
 
     func selectedSyncProfile() -> SyncProfile? {
@@ -2456,7 +2822,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
             runText = "nog niet"
         }
         let nextText: String
-        if profile.enabled, let next = nextSyncDate(for: profile) {
+        if profile.enabled && automaticSyncsArePaused() {
+            nextText = "gepauzeerd"
+        } else if profile.enabled, let next = nextSyncDate(for: profile) {
             nextText = fileInfoFormatterQueue.sync { fileInfoFormatter.string(from: next) }
         } else if profile.enabled {
             nextText = "zodra mogelijk"
@@ -2604,8 +2972,13 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     }
 
     func tickSyncProfiles() {
+        guard !automaticSyncsArePaused() else {
+            refreshStatusItemAppearance()
+            return
+        }
         let now = Date()
         for original in syncProfilesSnapshot() where original.enabled {
+            if automaticSyncsArePaused() { break }
             let profile = resolveAndCaptureNetworkPaths(for: original)
             guard syncProfilePathsAvailable(profile) else {
                 showSyncWaiting(profile: profile, status: syncWaitingStatus(for: profile))
@@ -2614,7 +2987,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
                 }
                 continue
             }
-            if syncProfileIsDue(profile, now: now) {
+            if !automaticSyncsArePaused() && syncProfileIsDue(profile, now: now) {
                 startSyncRun(profile: profile, manual: false)
             }
         }
@@ -2627,7 +3000,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
             return true
         }
         if started {
-            DispatchQueue.main.async { self.refreshSyncProfileMenu() }
+            DispatchQueue.main.async {
+                self.refreshSyncProfileMenu()
+                self.updateStatusItemAppearance()
+            }
         }
         return started
     }
@@ -2636,7 +3012,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         _ = syncStateQueue.sync {
             syncRunningProfileIds.remove(id)
         }
-        DispatchQueue.main.async { self.refreshSyncProfileMenu() }
+        DispatchQueue.main.async {
+            self.refreshSyncProfileMenu()
+            self.updateStatusItemAppearance()
+        }
     }
 
     func updateSyncProfile(id: String, _ mutate: @escaping (inout SyncProfile) -> Void) {

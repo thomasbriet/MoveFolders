@@ -2,6 +2,26 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9] - 2026-08-07
+
+### Toegevoegd
+
+- Nieuwe instellingenpagina via `MoveFolders → Instellingen…` (`Cmd+,`).
+- Optie `Start MoveFolders bij inloggen` registreert de hoofdapp via Apples `SMAppService` op macOS 13 en nieuwer en toont wanneer nog goedkeuring in Systeeminstellingen nodig is.
+- Optie `Start zonder hoofdvenster in de menubalk` laat MoveFolders na het inloggen als achtergrondapp draaien.
+- Een permanent MoveFolders-menubalkmenu toont de algemene status en de status van alle syncprofielen.
+- Vanuit de menubalk kunnen afzonderlijke profielen direct worden gesynchroniseerd, automatische syncs worden gepauzeerd of hervat, het log en hoofdvenster worden geopend en de app worden afgesloten.
+- De pauzestand blijft tussen app-sessies bewaard; lopende syncs worden veilig afgerond en handmatige syncs blijven beschikbaar.
+
+### Gewijzigd
+
+- Bij verborgen starten worden de mappenlijsten van `Move folders` pas geladen wanneer het hoofdvenster wordt geopend, zodat een trage of ontbrekende netwerkschijf de achtergrondstart niet ophoudt.
+- De GitHub-releaseworkflow gebruikt `actions/checkout@v7`, zodat de eerdere Node.js 20-waarschuwing vervalt.
+
+### Compatibiliteit
+
+- De Apple-silicon-releasebinary krijgt nu daadwerkelijk minimum macOS 11 mee in plaats van onbedoeld minimum macOS 26; alleen de systeemschakelaar voor automatisch starten vereist macOS 13 of nieuwer.
+
 ## [0.8.9] - 2026-08-07
 
 ### Toegevoegd
