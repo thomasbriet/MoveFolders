@@ -367,6 +367,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let supportsExtendedAttributes: Bool
         let supportsNoOwner: Bool
         let supportsNoGroup: Bool
+        let supportsIconv: Bool
     }
 
     lazy var rsyncConfig: RSyncConfig = detectRsyncConfig()
@@ -399,10 +400,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 supportsXattrs: help.contains("--xattrs"),
                 supportsExtendedAttributes: help.contains("--extended-attributes"),
                 supportsNoOwner: help.contains("--no-owner"),
-                supportsNoGroup: help.contains("--no-group")
+                supportsNoGroup: help.contains("--no-group"),
+                supportsIconv: help.contains("--iconv")
             )
             log("Rsync geselecteerd: \(path)")
-            log("Rsync features: info=\(config.supportsInfo) outFormat=\(config.supportsOutFormat) protectArgs=\(config.supportsProtectArgs) crtimes=\(config.supportsCrtimes) xattrs=\(config.supportsXattrs || config.supportsExtendedAttributes) noOwner=\(config.supportsNoOwner) noGroup=\(config.supportsNoGroup)")
+            log("Rsync features: info=\(config.supportsInfo) outFormat=\(config.supportsOutFormat) protectArgs=\(config.supportsProtectArgs) crtimes=\(config.supportsCrtimes) xattrs=\(config.supportsXattrs || config.supportsExtendedAttributes) noOwner=\(config.supportsNoOwner) noGroup=\(config.supportsNoGroup) iconv=\(config.supportsIconv)")
             return config
         }
 
@@ -415,7 +417,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             supportsXattrs: false,
             supportsExtendedAttributes: true,
             supportsNoOwner: false,
-            supportsNoGroup: false
+            supportsNoGroup: false,
+            supportsIconv: false
         )
         log("Waarschuwing: geen bruikbare rsync gevonden, fallback \(fallback.path)")
         return fallback
@@ -2689,6 +2692,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return NetworkMountInfo(remountURL: remountURL.absoluteString, relativePath: relativePath)
     }
 
+    func syncUnicodeNormalizationFlag(forDestinationPath path: String) -> String? {
+        guard rsyncConfig.supportsIconv,
+              networkMountInfo(forPath: path) != nil else { return nil }
+        return "--iconv=UTF-8,UTF-8-MAC"
+    }
+
     func mountedVolumeURL(forRemountURLString remountURLString: String) -> URL? {
         guard let rawURL = URL(string: remountURLString),
               let remountURL = sanitizedRemountURL(rawURL) else { return nil }
@@ -3228,7 +3237,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
         let srcArg = srcPath.hasSuffix("/") ? srcPath : "\(srcPath)/"
         let dstArg = dstPath.hasSuffix("/") ? dstPath : "\(dstPath)/"
-        let flags = rsyncFlags(
+        var flags = rsyncFlags(
             includePartial: true,
             includeItemize: true,
             includeProgress: true,
@@ -3237,6 +3246,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             includePermissions: false,
             includeDelete: profile.deleteExtra
         )
+        if let unicodeNormalizationFlag = syncUnicodeNormalizationFlag(forDestinationPath: dstPath) {
+            flags += " \(unicodeNormalizationFlag)"
+            log("Sync \(profile.name): Unicode-normalisatie voor netwerkschijf ingeschakeld (UTF-8 -> UTF-8-MAC)")
+        } else if networkMountInfo(forPath: dstPath) != nil && !rsyncConfig.supportsIconv {
+            log("Sync \(profile.name): Unicode-normalisatie niet beschikbaar in \(rsyncPath)")
+        }
         let cmd = "\(shellQuote(rsyncPath)) \(flags) \(shellQuote(srcArg)) \(shellQuote(dstArg))"
         let countQueue = DispatchQueue(label: "MoveFolders.sync.count.\(profile.id)")
         var transferred = 0

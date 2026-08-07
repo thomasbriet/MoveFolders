@@ -2,6 +2,13 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.2] - 2026-08-07
+
+### Opgelost
+
+- Sync naar netwerkschijven behandelt NFC- en NFD-spellingen van dezelfde bestandsnaam voortaan als gelijk. Namen zoals `Räuber` en `Räuber` worden daardoor niet meer bij iedere sync verwijderd en opnieuw overgezet.
+- Wanneer de geselecteerde rsync-versie dit ondersteunt, gebruikt netwerksync `UTF-8 → UTF-8-MAC`-normalisatie. Bij een oudere rsync zonder deze ondersteuning blijft de bestaande werkwijze intact en wordt dit in het log vermeld.
+
 ## [0.9.1] - 2026-08-07
 
 ### Toegevoegd

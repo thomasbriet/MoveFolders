@@ -4,21 +4,21 @@ MoveFolders is een macOS AppKit tool om projectmappen tussen volumes/netwerkschi
 
 De releasebuild is voor Apple silicon en vereist macOS 11 of nieuwer. Automatisch starten via de systeemlogin-iteminstelling vereist macOS 13 of nieuwer.
 
-De app onthoudt de 5 laatst gebruikte bron- en doelpaden, ondersteunt favorieten voor bron/doel/opties, kan mislukte of geannuleerde overdrachten hervatten, en ondersteunt meerdere eenrichtings-syncprofielen zolang de app draait. Sync-profielen kunnen ontbrekende netwerkschijven iedere vijf minuten opnieuw laten verbinden en gaan automatisch verder zodra de mappen weer beschikbaar zijn. Via `Instellingen…` kan MoveFolders bij het inloggen starten en verborgen in de menubalk blijven draaien. Het menubalkmenu biedt status, handmatige sync, pauzeren/hervatten en toegang tot het log. Lege geselecteerde bronmappen kunnen standaard automatisch worden overgeslagen. Een persistent overdrachtslog registreert per bestand of het wel of niet is overgezet en is via de knop `Log` te openen.
+De app onthoudt de 5 laatst gebruikte bron- en doelpaden, ondersteunt favorieten voor bron/doel/opties, kan mislukte of geannuleerde overdrachten hervatten, en ondersteunt meerdere eenrichtings-syncprofielen zolang de app draait. Sync-profielen kunnen ontbrekende netwerkschijven iedere vijf minuten opnieuw laten verbinden en gaan automatisch verder zodra de mappen weer beschikbaar zijn. Bestandsnamen met accenten worden bij sync naar netwerkschijven genormaliseerd, zodat Unicode-varianten niet onterecht als verwijderen plus opnieuw overzetten worden gezien. Via `Instellingen…` kan MoveFolders bij het inloggen starten en verborgen in de menubalk blijven draaien. Het menubalkmenu biedt status, handmatige sync, pauzeren/hervatten en toegang tot het log. Lege geselecteerde bronmappen kunnen standaard automatisch worden overgeslagen. Een persistent overdrachtslog registreert per bestand of het wel of niet is overgezet en is via de knop `Log` te openen.
 
 Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.9.1
+./scripts/build_release.sh 0.9.2
 ```
 
 Dit maakt lokaal:
 
 - `MoveFolders.app`
-- `MoveFolders_v0.9.1_share.zip`
-- `MoveFolders_v0.9.1_installer.pkg`
+- `MoveFolders_v0.9.2_share.zip`
+- `MoveFolders_v0.9.2_installer.pkg`
 
 ## Updates
 
