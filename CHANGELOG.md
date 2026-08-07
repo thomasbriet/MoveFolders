@@ -2,6 +2,13 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.3] - 2026-08-07
+
+### Opgelost
+
+- De syncvoortgang verwerkt nu ook de carriage-return-updates waarmee rsync een lopende voortgangsregel vernieuwt. Hierdoor worden percentage, snelheid en ETA tijdens grote bestanden ongeveer iedere seconde bijgewerkt in plaats van pas bij de volgende volledige tekstregel.
+- UTF-8-tekens in bestandsnamen blijven intact wanneer een leesblok toevallig midden in een teken eindigt.
+
 ## [0.9.2] - 2026-08-07
 
 ### Opgelost

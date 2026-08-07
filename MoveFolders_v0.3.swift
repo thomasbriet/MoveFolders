@@ -4369,6 +4369,24 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (task.terminationStatus, output)
     }
 
+    func appendStreamingData(_ data: Data, to buffer: inout Data) -> [String] {
+        buffer.append(data)
+        var records: [String] = []
+        var recordStart = buffer.startIndex
+
+        for index in buffer.indices {
+            let byte = buffer[index]
+            guard byte == 0x0A || byte == 0x0D else { continue }
+            records.append(String(decoding: buffer[recordStart..<index], as: UTF8.self))
+            recordStart = buffer.index(after: index)
+        }
+
+        if recordStart != buffer.startIndex {
+            buffer.removeSubrange(buffer.startIndex..<recordStart)
+        }
+        return records
+    }
+
     func runCommandStreaming(_ cmd: String, timeout: TimeInterval? = nil, killGrace: TimeInterval = 5, onLine: @escaping (String) -> Void) -> (exitCode: Int32, output: String, timedOut: Bool) {
         log("Run command (stream): \(cmd)")
         let task = Process()
@@ -4379,7 +4397,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         task.standardError = pipe
 
         var outputData = Data()
-        var buffer = ""
+        var buffer = Data()
         let sem = DispatchSemaphore(value: 0)
         let lastOutputQueue = DispatchQueue(label: "MoveFolders.runCommandStreaming.lastOutput")
         var lastOutput = Date()
@@ -4421,17 +4439,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             let data = handle.availableData
             guard data.count > 0 else { return }
             outputData.append(data)
-            guard let chunk = String(data: data, encoding: .utf8) else { return }
             lastOutputQueue.sync { lastOutput = Date() }
-            buffer += chunk
-            var lines = buffer.split(separator: "\n", omittingEmptySubsequences: false)
-            if buffer.last != "\n" {
-                buffer = String(lines.removeLast())
-            } else {
-                buffer = ""
-            }
-            for line in lines {
-                onLine(String(line))
+            for record in self.appendStreamingData(data, to: &buffer) {
+                onLine(record)
             }
         }
 
@@ -4441,12 +4451,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             timeoutTimer?.cancel()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             outputData.append(data)
-            if let tail = String(data: data, encoding: .utf8), !tail.isEmpty {
-                buffer += tail
+            for record in self.appendStreamingData(data, to: &buffer) {
+                onLine(record)
             }
             if !buffer.isEmpty {
-                onLine(buffer)
-                buffer = ""
+                onLine(String(decoding: buffer, as: UTF8.self))
+                buffer.removeAll()
             }
             sem.signal()
         }
