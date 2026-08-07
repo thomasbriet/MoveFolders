@@ -502,6 +502,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var saveSyncProfileButton: NSButton!
     var toggleSyncProfileButton: NSButton!
     var runSyncProfileButton: NSButton!
+    var syncTransferLogButton: NSButton!
     var syncStatusLabel: NSTextField!
     var syncNameLabel: NSTextField!
     var syncSrcLabel: NSTextField!
@@ -949,6 +950,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         saveSyncProfileButton = makeButton("Bewaar sync", 365, 477, 110, 28, #selector(saveCurrentSyncProfile), in: syncContent)
         toggleSyncProfileButton = makeButton("Sync aan/uit", 485, 477, 110, 28, #selector(toggleSelectedSyncProfile), in: syncContent)
         runSyncProfileButton = makeButton("Sync nu", 605, 477, 90, 28, #selector(runSelectedSyncProfileNow), in: syncContent)
+        syncTransferLogButton = makeButton("Log", 705, 477, 60, 28, #selector(toggleTransferLog), in: syncContent)
         syncNameLabel = makeLabel("Naam:", 20, 430, in: syncContent)
         syncNameField = makeTextField(120, 426, 420, "Nieuwe sync", in: syncContent)
         syncSrcLabel = makeLabel("Folder A:", 20, 390, in: syncContent)
@@ -1545,6 +1547,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         saveSyncProfileButton.frame = NSRect(x: 390, y: topY, width: 110, height: 28)
         toggleSyncProfileButton.frame = NSRect(x: 510, y: topY, width: 115, height: 28)
         runSyncProfileButton.frame = NSRect(x: 635, y: topY, width: 90, height: 28)
+        syncTransferLogButton.frame = NSRect(x: 735, y: topY, width: 60, height: 28)
 
         let fieldX = margin + labelW + 10
         let fieldRightInset: CGFloat = 58

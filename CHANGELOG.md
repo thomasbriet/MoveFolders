@@ -2,6 +2,13 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.1] - 2026-08-07
+
+### Toegevoegd
+
+- Het tabblad `Sync folders` heeft nu een eigen knop `Log` naast `Sync nu`.
+- De knop opent hetzelfde doorlopende overdrachtslog als de bestaande logknop in `Move folders` en het menubalkmenu.
+
 ## [0.9] - 2026-08-07
 
 ### Toegevoegd
