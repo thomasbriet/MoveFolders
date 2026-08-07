@@ -1,5 +1,6 @@
 import Cocoa
 import Darwin
+import NetFS
 import ServiceManagement
 
 class TableAdapter: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -1803,15 +1804,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             showSyncWaiting(profile: profile, status: status)
             let requested = syncAutoReconnectEnabled(for: profile) && attemptNetworkReconnect(for: profile, force: true)
             if requested {
-                if profile.enabled {
-                    alert("MoveFolders heeft macOS gevraagd de ontbrekende netwerkschijf opnieuw te verbinden. De app blijft controleren en start de sync zodra Folder A en Folder B beschikbaar zijn en het profiel aan de beurt is.")
-                } else {
-                    alert("MoveFolders heeft macOS gevraagd de ontbrekende netwerkschijf opnieuw te verbinden. Dit profiel staat uit; klik opnieuw op ‘Sync nu’ zodra Folder A en Folder B beschikbaar zijn.")
-                }
+                log("Stille netwerkkoppeling aangevraagd via Sync nu: \(profile.name)")
             } else if syncAutoReconnectEnabled(for: profile) {
-                alert("De netwerkschijf kan nog niet automatisch worden verbonden. Koppel de share één keer handmatig en bewaar het sync-profiel opnieuw; daarna kan MoveFolders de verbinding onthouden.")
+                showSyncWaiting(
+                    profile: profile,
+                    status: "De netwerkschijf kan nog niet automatisch worden verbonden. Koppel de share één keer handmatig en bewaar dit profiel opnieuw."
+                )
             } else {
-                alert("Folder A of Folder B is niet beschikbaar. Automatisch verbinden staat voor dit profiel uit.")
+                showSyncWaiting(
+                    profile: profile,
+                    status: "Folder A of Folder B is niet beschikbaar. Automatisch verbinden staat voor dit profiel uit."
+                )
             }
             return
         }
@@ -2921,12 +2924,61 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
     }
 
-    func openReconnectURL(_ url: URL) -> Bool {
-        if Thread.isMainThread {
-            return NSWorkspace.shared.open(url)
+    func networkMountErrorDescription(_ status: Int32) -> String {
+        if status > 0 {
+            return NSError(domain: NSPOSIXErrorDomain, code: Int(status)).localizedDescription
         }
-        return DispatchQueue.main.sync {
-            NSWorkspace.shared.open(url)
+        return NSError(domain: NSOSStatusErrorDomain, code: Int(status)).localizedDescription
+    }
+
+    func mountNetworkVolumeSilently(_ url: URL) -> (success: Bool, status: Int32, mountPaths: [String]) {
+        let openOptions = NSMutableDictionary()
+        openOptions[kNAUIOptionKey as String] = kNAUIOptionNoUI
+
+        let mountOptions = NSMutableDictionary()
+        mountOptions[kNetFSAllowSubMountsKey as String] = true
+
+        var unmanagedMountPoints: Unmanaged<CFArray>?
+        let status = NetFSMountURLSync(
+            url as CFURL,
+            nil,
+            nil,
+            nil,
+            openOptions as CFMutableDictionary,
+            mountOptions as CFMutableDictionary,
+            &unmanagedMountPoints
+        )
+        let mountPoints = unmanagedMountPoints?.takeRetainedValue() as? [String] ?? []
+        return (status == 0, status, mountPoints)
+    }
+
+    func requestSilentNetworkMount(_ url: URL, profile: SyncProfile, label: String) {
+        DispatchQueue.global(qos: .utility).async {
+            let result = self.mountNetworkVolumeSilently(url)
+            let mounted = result.success || self.mountedVolumeURL(forRemountURLString: url.absoluteString) != nil
+            if mounted {
+                let pathDetail = result.mountPaths.isEmpty ? "gekoppeld" : "gekoppeld op \(result.mountPaths.joined(separator: ", "))"
+                self.log("Netwerkschijf verbinden: \(profile.name) | \(label) | stil \(pathDetail)")
+                self.recordTransferLog(
+                    status: "NETWERKSCHIJF GEKOPPELD",
+                    relativePath: profile.name,
+                    detail: "\(label): stil \(pathDetail)"
+                )
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+                    self.tickSyncProfiles()
+                }
+                return
+            }
+
+            let error = self.networkMountErrorDescription(result.status)
+            let status = "\(label) kon niet stil worden verbonden: \(error). Nieuwe poging over maximaal 5 minuten."
+            self.log("Netwerkschijf verbinden mislukt: \(profile.name) | \(status)")
+            self.recordTransferLog(
+                status: "NETWERKSCHIJF KOPPELEN MISLUKT",
+                relativePath: profile.name,
+                detail: status
+            )
+            self.showSyncWaiting(profile: profile, status: status)
         }
     }
 
@@ -2958,15 +3010,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }
             guard shouldAttempt else { continue }
 
-            let opened = openReconnectURL(url)
-            requested = requested || opened
-            let result = opened ? "koppelpoging aangevraagd" : "macOS kon de koppelpoging niet starten"
-            log("Netwerkschijf verbinden: \(profile.name) | \(candidate.label) | \(result)")
-            recordTransferLog(
-                status: opened ? "NETWERKSCHIJF KOPPELEN" : "NETWERKSCHIJF KOPPELEN MISLUKT",
-                relativePath: profile.name,
-                detail: "\(candidate.label): \(result)"
-            )
+            requestSilentNetworkMount(url, profile: profile, label: candidate.label)
+            requested = true
+            log("Netwerkschijf verbinden: \(profile.name) | \(candidate.label) | stille koppelpoging gestart")
         }
         return requested
     }

@@ -2,6 +2,15 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.4] - 2026-08-07
+
+### Gewijzigd
+
+- Automatische koppelpogingen voor ontbrekende netwerkschijven gebruiken nu macOS NetFS in `NoUI`-modus. Finder wordt niet meer geopend en er verschijnt geen inlogvenster.
+- De stille koppeling gebruikt bestaande macOS-Sleutelhangergegevens. Als authenticatie niet zonder invoer lukt, blijft het sync-profiel wachten, wordt de fout alleen in status en log gezet en volgt na maximaal vijf minuten een nieuwe poging.
+- Ook `Sync nu` toont geen bevestigingsalert wanneer eerst stil een ontbrekende netwerkschijf moet worden gekoppeld; de actuele toestand blijft zichtbaar in het syncscherm en log.
+- Een geslaagde achtergrondkoppeling laat een ingeschakeld profiel automatisch opnieuw beoordelen, zodat de sync kort daarna kan starten zonder op de volgende schedulerronde te wachten.
+
 ## [0.9.3] - 2026-08-07
 
 ### Opgelost

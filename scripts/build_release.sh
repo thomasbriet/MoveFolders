@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.9.3}"
+VERSION="${1:-0.9.4}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -17,7 +17,7 @@ PKG_SCRIPTS_DIR=".build/pkg-scripts"
 
 rm -rf "$APP_DIR" "${APP_NAME}.bin" "${ARTIFACT_NAME}.bin" "${ARTIFACT_NAME}_installer.pkg" "${ARTIFACT_NAME}_share.zip" "$PKG_SCRIPTS_DIR"
 
-swiftc -target arm64-apple-macosx11.0 "$SOURCE" -o "${ARTIFACT_NAME}.bin" -framework AppKit -framework Foundation -framework ServiceManagement
+swiftc -target arm64-apple-macosx11.0 "$SOURCE" -o "${ARTIFACT_NAME}.bin" -framework AppKit -framework Foundation -framework NetFS -framework ServiceManagement
 
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "${ARTIFACT_NAME}.bin" "$APP_DIR/Contents/MacOS/$EXECUTABLE"
