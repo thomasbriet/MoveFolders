@@ -2,6 +2,19 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.9] - 2026-08-07
+
+### Opgelost
+
+- Het syncvoortgangsscherm toont tijdens de overdracht weer de actuele relatieve bestandsnaam en het pad.
+- Een rsync-voortgangsregel zoals `311.47M 8% 1.11MB/s` wordt niet langer ten onrechte achter `Bestand:` weergegeven.
+- De live bestandsmarker wordt nu vóór de overdracht weergegeven. Zodra rsync met het volgende item begint, wordt het voorgaande bestand als afgerond verwerkt en krijgt het veilig zijn bronwijzigingsdatum terug.
+- Het hervatgedrag uit 0.9.8 blijft behouden: bij annuleren wordt het actieve, mogelijk onvoltooide bestand niet als afgerond gemarkeerd.
+
+### Getest
+
+- In een SMB-proef verschenen drie opeenvolgende bestandsnamen live. Na annuleren bij het derde bestand werden de twee afgeronde bestanden bij een nieuwe dry-run overgeslagen en bleef uitsluitend het derde bestand over.
+
 ## [0.9.8] - 2026-08-07
 
 ### Opgelost

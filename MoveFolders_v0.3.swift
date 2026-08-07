@@ -373,7 +373,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
     lazy var rsyncConfig: RSyncConfig = detectRsyncConfig()
     let rsyncOutFormatMarker = "__MF_CUR__:"
-    let syncCompletedOutFormatMarker = "__MF_SYNC_DONE__:"
+    let syncItemOutFormatMarker = "__MF_SYNC_ITEM__:"
 
     var rsyncPath: String { rsyncConfig.path }
 
@@ -3353,18 +3353,14 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (code, path)
     }
 
-    func syncCompletedEntry(from line: String) -> (code: String, path: String)? {
+    func syncOutFormatEntry(from line: String) -> (code: String, path: String)? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(syncCompletedOutFormatMarker) else { return nil }
-        let payload = String(trimmed.dropFirst(syncCompletedOutFormatMarker.count))
-        guard let firstSeparator = payload.firstIndex(of: "|") else { return nil }
-        let afterFirst = payload.index(after: firstSeparator)
-        guard let secondSeparator = payload[afterFirst...].firstIndex(of: "|") else { return nil }
+        guard trimmed.hasPrefix(syncItemOutFormatMarker) else { return nil }
+        let payload = String(trimmed.dropFirst(syncItemOutFormatMarker.count))
+        guard let separator = payload.firstIndex(of: "|") else { return nil }
 
-        let code = String(payload[..<firstSeparator]).trimmingCharacters(in: .whitespaces)
-        let byteText = String(payload[afterFirst..<secondSeparator]).trimmingCharacters(in: .whitespaces)
-        guard UInt64(byteText) != nil else { return nil }
-        var path = String(payload[payload.index(after: secondSeparator)...])
+        let code = String(payload[..<separator]).trimmingCharacters(in: .whitespaces)
+        var path = String(payload[payload.index(after: separator)...])
         if path.hasPrefix("./") { path.removeFirst(2) }
         guard !code.isEmpty, !path.isEmpty else { return nil }
         return (code, path)
@@ -3608,7 +3604,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             includeDelete: profile.deleteExtra
         )
         if repairsTimestampsImmediately {
-            flags += " --out-format='\(syncCompletedOutFormatMarker)%i|%b|%n'"
+            flags += " --out-format='\(syncItemOutFormatMarker)%i|%n'"
             log("Sync \(profile.name): wijzigingsdatums worden direct na ieder afgerond bestand hersteld")
         } else {
             log("Sync \(profile.name): rsync mist --out-format; datumherstel volgt na de volledige opdracht")
@@ -3628,6 +3624,65 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var pendingTimestampPaths: [String] = []
         var loggedSyncPaths: Set<String> = []
         var transferredPaths: [String] = []
+        var pendingSyncEntry: (code: String, path: String)?
+
+        func finalizePendingSyncEntry() {
+            let entry = countQueue.sync { () -> (code: String, path: String)? in
+                let entry = pendingSyncEntry
+                pendingSyncEntry = nil
+                return entry
+            }
+            guard let entry else { return }
+
+            if self.syncItemizedEntryTransfersContent(entry.code) {
+                let shouldProcess = countQueue.sync { () -> Bool in
+                    let inserted = loggedSyncPaths.insert("copy:\(entry.path)").inserted
+                    if inserted { transferred += 1 }
+                    return inserted
+                }
+                guard shouldProcess else { return }
+                self.recordTransferLog(status: "SYNC OVERGEZET", relativePath: entry.path, srcBase: srcPath, dstBase: dstPath, detail: "profiel: \(profile.name) | rsync: \(entry.code)")
+                switch self.repairSyncModificationDate(
+                    relativePath: entry.path,
+                    srcBase: srcPath,
+                    dstBase: dstPath,
+                    waitForRsyncFinalization: true
+                ) {
+                case .repaired:
+                    countQueue.sync { timestampRepaired += 1 }
+                case .skipped:
+                    break
+                case .failed(let reason):
+                    countQueue.sync { pendingTimestampPaths.append(entry.path) }
+                    self.log("Sync datumherstel uitgesteld tot na rsync: \(profile.name) | \(entry.path) | \(reason)")
+                }
+            } else if self.syncItemizedEntryIsMetadataOnly(entry.code) {
+                let shouldProcess = countQueue.sync { () -> Bool in
+                    let inserted = loggedSyncPaths.insert("metadata:\(entry.path)").inserted
+                    if inserted { metadataOnly += 1 }
+                    return inserted
+                }
+                guard shouldProcess else { return }
+                self.recordTransferLog(status: "SYNC NIET OVERGEZET", relativePath: entry.path, srcBase: srcPath, dstBase: dstPath, detail: "inhoud was al gelijk; alleen metadata/attributen weken af | rsync: \(entry.code)")
+                if self.syncItemizedEntryHasTimeDifference(entry.code) {
+                    switch self.repairSyncModificationDate(
+                        relativePath: entry.path,
+                        srcBase: srcPath,
+                        dstBase: dstPath,
+                        waitForRsyncFinalization: true
+                    ) {
+                    case .repaired:
+                        countQueue.sync { timestampRepaired += 1 }
+                    case .skipped:
+                        break
+                    case .failed(let reason):
+                        countQueue.sync { pendingTimestampPaths.append(entry.path) }
+                        self.log("Sync datumherstel uitgesteld tot na rsync: \(profile.name) | \(entry.path) | \(reason)")
+                    }
+                }
+            }
+        }
+
         let result = runCommandStreaming(
             cmd,
             timeout: nil,
@@ -3641,64 +3696,25 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         ) { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
-            if let completedEntry = self.syncCompletedEntry(from: trimmed) {
-                if completedEntry.code == "*deleting" {
+            if let currentEntry = self.syncOutFormatEntry(from: trimmed) {
+                if self.syncItemizedEntryTransfersContent(currentEntry.code) || self.syncItemizedEntryIsMetadataOnly(currentEntry.code) {
+                    self.updateSyncProgress(profileId: profile.id, detail: currentEntry.path)
+                } else if currentEntry.code == "*deleting" {
+                    self.updateSyncProgress(profileId: profile.id, detail: "Verwijderen: \(currentEntry.path)")
+                }
+
+                finalizePendingSyncEntry()
+                if currentEntry.code == "*deleting" {
                     let shouldLog = countQueue.sync { () -> Bool in
-                        let inserted = loggedSyncPaths.insert("delete:\(completedEntry.path)").inserted
+                        let inserted = loggedSyncPaths.insert("delete:\(currentEntry.path)").inserted
                         if inserted { deleted += 1 }
                         return inserted
                     }
                     if shouldLog {
-                        self.recordTransferLog(status: "SYNC VERWIJDERD", relativePath: completedEntry.path, dstBase: dstPath, detail: "profiel: \(profile.name)")
+                        self.recordTransferLog(status: "SYNC VERWIJDERD", relativePath: currentEntry.path, dstBase: dstPath, detail: "profiel: \(profile.name)")
                     }
-                } else if self.syncItemizedEntryTransfersContent(completedEntry.code) {
-                    let shouldProcess = countQueue.sync { () -> Bool in
-                        let inserted = loggedSyncPaths.insert("copy:\(completedEntry.path)").inserted
-                        if inserted { transferred += 1 }
-                        return inserted
-                    }
-                    if shouldProcess {
-                        self.recordTransferLog(status: "SYNC OVERGEZET", relativePath: completedEntry.path, srcBase: srcPath, dstBase: dstPath, detail: "profiel: \(profile.name) | rsync: \(completedEntry.code)")
-                        switch self.repairSyncModificationDate(
-                            relativePath: completedEntry.path,
-                            srcBase: srcPath,
-                            dstBase: dstPath,
-                            waitForRsyncFinalization: true
-                        ) {
-                        case .repaired:
-                            countQueue.sync { timestampRepaired += 1 }
-                        case .skipped:
-                            break
-                        case .failed(let reason):
-                            countQueue.sync { pendingTimestampPaths.append(completedEntry.path) }
-                            self.log("Sync datumherstel uitgesteld tot na rsync: \(profile.name) | \(completedEntry.path) | \(reason)")
-                        }
-                    }
-                } else if self.syncItemizedEntryIsMetadataOnly(completedEntry.code) {
-                    let shouldLog = countQueue.sync { () -> Bool in
-                        let inserted = loggedSyncPaths.insert("metadata:\(completedEntry.path)").inserted
-                        if inserted { metadataOnly += 1 }
-                        return inserted
-                    }
-                    if shouldLog {
-                        self.recordTransferLog(status: "SYNC NIET OVERGEZET", relativePath: completedEntry.path, srcBase: srcPath, dstBase: dstPath, detail: "inhoud was al gelijk; alleen metadata/attributen weken af | rsync: \(completedEntry.code)")
-                        if self.syncItemizedEntryHasTimeDifference(completedEntry.code) {
-                            switch self.repairSyncModificationDate(
-                                relativePath: completedEntry.path,
-                                srcBase: srcPath,
-                                dstBase: dstPath,
-                                waitForRsyncFinalization: true
-                            ) {
-                            case .repaired:
-                                countQueue.sync { timestampRepaired += 1 }
-                            case .skipped:
-                                break
-                            case .failed(let reason):
-                                countQueue.sync { pendingTimestampPaths.append(completedEntry.path) }
-                                self.log("Sync datumherstel uitgesteld tot na rsync: \(profile.name) | \(completedEntry.path) | \(reason)")
-                            }
-                        }
-                    }
+                } else if self.syncItemizedEntryTransfersContent(currentEntry.code) || self.syncItemizedEntryIsMetadataOnly(currentEntry.code) {
+                    countQueue.sync { pendingSyncEntry = currentEntry }
                 }
                 self.log("Sync \(profile.name): \(trimmed)")
                 return
@@ -3730,13 +3746,22 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                     }
                 }
             }
-            if let metrics = self.rsyncProgressMetrics(from: trimmed) {
+            let metrics = self.rsyncProgressMetrics(from: trimmed)
+            if let metrics {
                 self.updateSyncProgress(profileId: profile.id, percent: metrics.percent, speed: metrics.speed, eta: metrics.eta)
             }
-            if let detail = self.syncProgressDetail(fromRsyncLine: trimmed) {
+            if metrics == nil, let detail = self.syncProgressDetail(fromRsyncLine: trimmed) {
                 self.updateSyncProgress(profileId: profile.id, detail: detail)
             }
             self.log("Sync \(profile.name): \(trimmed)")
+        }
+
+        if result.exitCode == 0,
+           !result.timedOut,
+           !syncCancellationRequested(for: profile.id) {
+            finalizePendingSyncEntry()
+        } else {
+            countQueue.sync { pendingSyncEntry = nil }
         }
         let snapshot = countQueue.sync { (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths) }
         var timestampRepair = SyncTimestampRepairResult(repaired: snapshot.4, failed: 0, cancelled: false)
