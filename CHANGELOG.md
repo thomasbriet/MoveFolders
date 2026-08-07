@@ -2,6 +2,19 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.7] - 2026-08-07
+
+### Opgelost
+
+- Sommige SMB-doelen namen na rsync wel de juiste aanmaakdatum over, maar lieten `Laatst gewijzigd` op het overdrachtsmoment staan. Hierdoor verschenen dezelfde bestanden bij iedere sync opnieuw als `>f..t.......` en werden ze opnieuw verstuurd.
+- Na rsync herstelt MoveFolders nu de wijzigingsdatum van ieder werkelijk overgezet regulier bestand expliciet vanuit de bron en leest de doelmetadata opnieuw ter controle.
+- Een bestand wordt alleen aangepast wanneer bron en doel dezelfde grootte hebben. Een afwijkende grootte of geweigerde datum wordt niet verborgen maar als `SYNC DATUMHERSTEL MISLUKT` per bestand gelogd en maakt de syncstatus fout.
+- Datumherstel kan met `Stop sync` worden geannuleerd en toont tijdens de nabehandeling `Datums herstellen: x/y` in de voortgang.
+
+### Getest
+
+- Op dezelfde SMB-share bleef zowel wijzigingsdatum als aanmaakdatum na de reparatie correct staan; een aansluitende rsync-dry-run meldde geen tijdsafwijking en geen overdracht meer.
+
 ## [0.9.6] - 2026-08-07
 
 ### Toegevoegd
