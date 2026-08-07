@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.6] - 2026-08-07
+
+### Toegevoegd
+
+- Het tabblad `Sync folders` heeft nu een knop `Stop sync` voor het geselecteerde actieve syncprofiel.
+- Stoppen beëindigt de volledige rsync-procesboom van dat profiel. Andere gelijktijdige syncprofielen blijven doorlopen.
+
+### Gewijzigd
+
+- Een handmatig gestopte sync krijgt de status `Geannuleerd door gebruiker` en wordt apart als `SYNC GEANNULEERD` gelogd.
+- Annuleren telt niet als nieuwe verbindings- of syncfout. Een ingeschakeld profiel mag pas bij zijn volgende geplande moment opnieuw starten.
+
 ## [0.9.5] - 2026-08-07
 
 ### Opgelost

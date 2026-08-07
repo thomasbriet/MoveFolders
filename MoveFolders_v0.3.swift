@@ -506,6 +506,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var saveSyncProfileButton: NSButton!
     var toggleSyncProfileButton: NSButton!
     var runSyncProfileButton: NSButton!
+    var stopSyncProfileButton: NSButton!
     var syncTransferLogButton: NSButton!
     var syncStatusLabel: NSTextField!
     var syncNameLabel: NSTextField!
@@ -580,6 +581,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var lastResumeJob: ResumableTransferJob?
     var syncProfiles: [SyncProfile] = []
     var syncRunningProfileIds: Set<String> = []
+    var syncActiveProcesses: [String: Process] = [:]
+    var syncCancellationRequestedProfileIds: Set<String> = []
     var syncReconnectLastAttempt: [String: Date] = [:]
     var automaticSyncsPaused = false
     var startHiddenInMenuBar = false
@@ -957,7 +960,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         saveSyncProfileButton = makeButton("Bewaar sync", 365, 477, 110, 28, #selector(saveCurrentSyncProfile), in: syncContent)
         toggleSyncProfileButton = makeButton("Sync aan/uit", 485, 477, 110, 28, #selector(toggleSelectedSyncProfile), in: syncContent)
         runSyncProfileButton = makeButton("Sync nu", 605, 477, 90, 28, #selector(runSelectedSyncProfileNow), in: syncContent)
-        syncTransferLogButton = makeButton("Log", 705, 477, 60, 28, #selector(toggleTransferLog), in: syncContent)
+        stopSyncProfileButton = makeButton("Stop sync", 705, 477, 100, 28, #selector(stopSelectedSyncProfile), in: syncContent)
+        stopSyncProfileButton.isEnabled = false
+        syncTransferLogButton = makeButton("Log", 815, 477, 60, 28, #selector(toggleTransferLog), in: syncContent)
         syncNameLabel = makeLabel("Naam:", 20, 430, in: syncContent)
         syncNameField = makeTextField(120, 426, 420, "Nieuwe sync", in: syncContent)
         syncSrcLabel = makeLabel("Folder A:", 20, 390, in: syncContent)
@@ -1554,7 +1559,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         saveSyncProfileButton.frame = NSRect(x: 390, y: topY, width: 110, height: 28)
         toggleSyncProfileButton.frame = NSRect(x: 510, y: topY, width: 115, height: 28)
         runSyncProfileButton.frame = NSRect(x: 635, y: topY, width: 90, height: 28)
-        syncTransferLogButton.frame = NSRect(x: 735, y: topY, width: 60, height: 28)
+        stopSyncProfileButton.frame = NSRect(x: 735, y: topY, width: 100, height: 28)
+        syncTransferLogButton.frame = NSRect(x: 845, y: topY, width: 60, height: 28)
 
         let fieldX = margin + labelW + 10
         let fieldRightInset: CGFloat = 58
@@ -1798,6 +1804,29 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             return
         }
         requestImmediateSync(selectedProfile)
+    }
+
+    @objc func stopSelectedSyncProfile() {
+        guard let profile = selectedSyncProfile() else { return }
+        let state = syncStateQueue.sync { () -> (running: Bool, process: Process?) in
+            guard syncRunningProfileIds.contains(profile.id) else { return (false, nil) }
+            syncCancellationRequestedProfileIds.insert(profile.id)
+            return (true, syncActiveProcesses[profile.id])
+        }
+        guard state.running else {
+            refreshSyncProfileMenu()
+            return
+        }
+
+        stopSyncProfileButton.isEnabled = false
+        updateSyncProgress(profileId: profile.id, detail: "annuleren...")
+        log("Sync annuleren aangevraagd: \(profile.name)")
+        recordTransferLog(status: "SYNC ANNULEREN", relativePath: profile.name, detail: "aangevraagd door gebruiker")
+        if let process = state.process {
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.terminateSyncProcessTree(process, profileId: profile.id)
+            }
+        }
     }
 
     func requestImmediateSync(_ selectedProfile: SyncProfile) {
@@ -2804,6 +2833,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             syncProfilePopup.lastItem?.isEnabled = false
             syncProfilePopup.isEnabled = false
             runSyncProfileButton?.isEnabled = false
+            stopSyncProfileButton?.isEnabled = false
             toggleSyncProfileButton?.isEnabled = false
             syncProfilePopup.selectItem(at: 0)
             saveSyncProfileButton?.title = "Bewaar sync"
@@ -2822,6 +2852,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
         syncProfilePopup.isEnabled = true
         runSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
+        stopSyncProfileButton?.isEnabled = selectedSyncProfileId.map { runningIds.contains($0) } ?? false
         toggleSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
         saveSyncProfileButton?.title = selectedSyncProfileId == nil ? "Maak sync" : "Bewaar sync"
         syncProfilePopup.selectItem(at: 0)
@@ -3054,6 +3085,88 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
     }
 
+    func directChildProcessIDs(of parentPID: pid_t) -> [pid_t] {
+        let task = Process()
+        task.launchPath = "/usr/bin/pgrep"
+        task.arguments = ["-P", String(parentPID)]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return []
+        }
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return output.split(whereSeparator: { $0.isWhitespace }).compactMap { pid_t($0) }
+    }
+
+    func processTreeIDs(rootPID: pid_t) -> [pid_t] {
+        var result: [pid_t] = []
+        var pending = [rootPID]
+        var seen = Set<pid_t>()
+        while let current = pending.first {
+            pending.removeFirst()
+            guard seen.insert(current).inserted else { continue }
+            result.append(current)
+            pending.append(contentsOf: directChildProcessIDs(of: current))
+        }
+        return result
+    }
+
+    func terminateSyncProcessTree(_ process: Process, profileId: String) {
+        guard process.isRunning else { return }
+        let processIDs = processTreeIDs(rootPID: process.processIdentifier)
+        log("Sync proces stoppen: profiel \(profileId) | pids \(processIDs.map(String.init).joined(separator: ", "))")
+        for processID in processIDs.reversed() {
+            _ = Darwin.kill(processID, SIGTERM)
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + commandKillGrace) {
+            guard process.isRunning else { return }
+            let remainingProcessIDs = self.processTreeIDs(rootPID: process.processIdentifier)
+            self.log("Sync proces reageert niet op SIGTERM; SIGKILL naar pids \(remainingProcessIDs.map(String.init).joined(separator: ", "))")
+            for processID in remainingProcessIDs.reversed() {
+                _ = Darwin.kill(processID, SIGKILL)
+            }
+        }
+    }
+
+    func syncCancellationRequested(for profileId: String) -> Bool {
+        syncStateQueue.sync { syncCancellationRequestedProfileIds.contains(profileId) }
+    }
+
+    func registerActiveSyncProcess(_ process: Process, profileId: String) {
+        guard process.isRunning else { return }
+        let shouldStop = syncStateQueue.sync { () -> Bool in
+            syncActiveProcesses[profileId] = process
+            return syncCancellationRequestedProfileIds.contains(profileId)
+        }
+        DispatchQueue.main.async {
+            self.refreshSyncProfileMenu()
+        }
+        if shouldStop {
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.terminateSyncProcessTree(process, profileId: profileId)
+            }
+        }
+    }
+
+    func unregisterActiveSyncProcess(_ process: Process, profileId: String) {
+        syncStateQueue.sync {
+            if syncActiveProcesses[profileId] === process {
+                syncActiveProcesses.removeValue(forKey: profileId)
+            }
+        }
+    }
+
+    func clearSyncExecutionState(profileId: String) {
+        syncStateQueue.sync {
+            syncActiveProcesses.removeValue(forKey: profileId)
+            syncCancellationRequestedProfileIds.remove(profileId)
+        }
+    }
+
     func markSyncProfileRunning(_ id: String) -> Bool {
         let started = syncStateQueue.sync {
             if syncRunningProfileIds.contains(id) { return false }
@@ -3253,14 +3366,25 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     func runSyncProfile(_ profile: SyncProfile, manual: Bool) {
-        defer { unmarkSyncProfileRunning(profile.id) }
+        defer {
+            clearSyncExecutionState(profileId: profile.id)
+            unmarkSyncProfileRunning(profile.id)
+        }
         log("Sync start: \(profile.name) | \(profile.srcPath) -> \(profile.dstPath)")
         recordTransferLog(status: "SYNC GESTART", relativePath: profile.name, detail: "Folder A: \(profile.srcPath) | Folder B: \(profile.dstPath)")
+        if syncCancellationRequested(for: profile.id) {
+            finishCancelledSync(profile)
+            return
+        }
         let fm = FileManager.default
         let srcPath = normalizePath(profile.srcPath)
         let dstPath = normalizePath(profile.dstPath)
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: srcPath, isDirectory: &isDir), isDir.boolValue else {
+            if syncCancellationRequested(for: profile.id) {
+                finishCancelledSync(profile)
+                return
+            }
             if syncAutoReconnectEnabled(for: profile) {
                 showSyncWaiting(profile: profile, status: syncWaitingStatus(for: profile))
                 _ = attemptNetworkReconnect(for: profile, force: false)
@@ -3271,6 +3395,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
         var dstIsDir: ObjCBool = false
         guard fm.fileExists(atPath: dstPath, isDirectory: &dstIsDir), dstIsDir.boolValue else {
+            if syncCancellationRequested(for: profile.id) {
+                finishCancelledSync(profile)
+                return
+            }
             if syncAutoReconnectEnabled(for: profile) {
                 showSyncWaiting(profile: profile, status: syncWaitingStatus(for: profile))
                 _ = attemptNetworkReconnect(for: profile, force: false)
@@ -3280,7 +3408,15 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             return
         }
         guard fm.isWritableFile(atPath: dstPath) else {
+            if syncCancellationRequested(for: profile.id) {
+                finishCancelledSync(profile)
+                return
+            }
             finishSyncProfile(profile, success: false, status: "Geen schrijfrechten op Folder B: \(dstPath)")
+            return
+        }
+        if syncCancellationRequested(for: profile.id) {
+            finishCancelledSync(profile)
             return
         }
 
@@ -3307,7 +3443,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var deleted = 0
         var metadataOnly = 0
         var loggedSyncPaths: Set<String> = []
-        let result = runCommandStreaming(cmd, timeout: nil, killGrace: commandKillGrace) { line in
+        let result = runCommandStreaming(
+            cmd,
+            timeout: nil,
+            killGrace: commandKillGrace,
+            processStarted: { process in
+                self.registerActiveSyncProcess(process, profileId: profile.id)
+            },
+            processFinished: { process in
+                self.unregisterActiveSyncProcess(process, profileId: profile.id)
+            }
+        ) { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             if trimmed.hasPrefix("*deleting") {
@@ -3343,7 +3489,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             self.log("Sync \(profile.name): \(trimmed)")
         }
         let counts = countQueue.sync { (transferred, deleted, metadataOnly) }
-        if result.exitCode == 0 && result.timedOut == false {
+        if syncCancellationRequested(for: profile.id) {
+            finishCancelledSync(profile)
+        } else if result.exitCode == 0 && result.timedOut == false {
             var status = counts.0 == 0 && counts.1 == 0 ? "OK: niets overgezet" : "OK: \(counts.0) bestanden overgezet"
             if counts.1 > 0 { status += ", \(counts.1) verwijderd" }
             if counts.2 > 0 { status += " | \(counts.2) alleen metadata/attributen (inhoud overgeslagen)" }
@@ -3354,14 +3502,28 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
     }
 
-    func finishSyncProfile(_ profile: SyncProfile, success: Bool, status: String) {
+    func finishCancelledSync(_ profile: SyncProfile) {
+        finishSyncProfile(
+            profile,
+            success: false,
+            status: "Geannuleerd door gebruiker",
+            countAsFailure: false,
+            transferLogStatus: "SYNC GEANNULEERD"
+        )
+    }
+
+    func finishSyncProfile(_ profile: SyncProfile, success: Bool, status: String, countAsFailure: Bool = true, transferLogStatus: String? = nil) {
         log("Sync klaar: \(profile.name) | \(status)")
-        recordTransferLog(status: success ? "SYNC KLAAR" : "SYNC MISLUKT", relativePath: profile.name, detail: status)
+        recordTransferLog(status: transferLogStatus ?? (success ? "SYNC KLAAR" : "SYNC MISLUKT"), relativePath: profile.name, detail: status)
         finishSyncProgress(profileId: profile.id, profileName: profile.name, status: status, success: success)
         updateSyncProfile(id: profile.id) { item in
             item.lastRunAt = Date()
             item.lastStatus = status
-            item.consecutiveFailures = success ? 0 : item.consecutiveFailures + 1
+            if success {
+                item.consecutiveFailures = 0
+            } else if countAsFailure {
+                item.consecutiveFailures += 1
+            }
             item.updatedAt = Date()
         }
     }
@@ -4436,7 +4598,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return records
     }
 
-    func runCommandStreaming(_ cmd: String, timeout: TimeInterval? = nil, killGrace: TimeInterval = 5, onLine: @escaping (String) -> Void) -> (exitCode: Int32, output: String, timedOut: Bool) {
+    func runCommandStreaming(_ cmd: String, timeout: TimeInterval? = nil, killGrace: TimeInterval = 5, processStarted: ((Process) -> Void)? = nil, processFinished: ((Process) -> Void)? = nil, onLine: @escaping (String) -> Void) -> (exitCode: Int32, output: String, timedOut: Bool) {
         log("Run command (stream): \(cmd)")
         let task = Process()
         task.launchPath = "/bin/sh"
@@ -4507,6 +4669,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 onLine(String(decoding: buffer, as: UTF8.self))
                 buffer.removeAll()
             }
+            processFinished?(task)
             sem.signal()
         }
 
@@ -4519,6 +4682,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             return (1, "", false)
         }
         log("Command pid: \(task.processIdentifier)")
+        processStarted?(task)
         heartbeatTimer.resume()
         timeoutTimer?.resume()
         sem.wait()
