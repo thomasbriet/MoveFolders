@@ -2,6 +2,14 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.5] - 2026-08-07
+
+### Opgelost
+
+- Het zichtbare overdrachtslog springt bij snel binnenkomende regels niet meer afwisselend omhoog en terug naar de nieuwste regel.
+- Nieuwe logregels worden voor de schermweergave per kwart seconde gebundeld; het volledige logbestand wordt nog steeds direct en per regel bijgewerkt.
+- Automatisch naar de nieuwste regel volgen gebeurt alleen wanneer de logweergave al onderaan stond. Na handmatig omhoog scrollen blijft de gekozen positie stabiel totdat je zelf weer naar beneden gaat.
+
 ## [0.9.4] - 2026-08-07
 
 ### Gewijzigd

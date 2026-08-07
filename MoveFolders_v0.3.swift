@@ -618,7 +618,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var transferLogWindow: NSWindow?
     var transferLogTextView: NSTextView?
     var transferLogFileHandle: FileHandle?
+    var transferLogPendingWindowText = ""
+    var transferLogWindowFlushScheduled = false
     let transferLogQueue = DispatchQueue(label: "MoveFolders.transferLog")
+    let transferLogWindowRefreshInterval: TimeInterval = 0.25
     lazy var transferLogURL: URL = {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library", isDirectory: true)
@@ -5248,6 +5251,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     func showTransferLogWindow() {
+        transferLogPendingWindowText = ""
         if transferLogWindow == nil {
             setupTransferLogWindow()
         } else {
@@ -5267,6 +5271,44 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             win.orderOut(nil)
         } else {
             showTransferLogWindow()
+        }
+    }
+
+    func transferLogIsNearBottom(_ textView: NSTextView, tolerance: CGFloat = 36) -> Bool {
+        let visibleRect = textView.visibleRect
+        let contentMaxY = textView.bounds.maxY
+        return contentMaxY - visibleRect.maxY <= tolerance
+    }
+
+    func enqueueTransferLogWindowUpdate(_ line: String) {
+        guard transferLogWindow?.isVisible == true, transferLogTextView != nil else { return }
+        transferLogPendingWindowText += line
+        guard !transferLogWindowFlushScheduled else { return }
+
+        transferLogWindowFlushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + transferLogWindowRefreshInterval) {
+            self.flushTransferLogWindowUpdates()
+        }
+    }
+
+    func flushTransferLogWindowUpdates() {
+        transferLogWindowFlushScheduled = false
+        let pendingText = transferLogPendingWindowText
+        transferLogPendingWindowText = ""
+        guard !pendingText.isEmpty,
+              transferLogWindow?.isVisible == true,
+              let textView = transferLogTextView,
+              let storage = textView.textStorage else { return }
+
+        let shouldFollowTail = transferLogIsNearBottom(textView)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.textColor,
+            .font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        ]
+        storage.append(NSAttributedString(string: pendingText, attributes: attrs))
+        if shouldFollowTail {
+            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+            textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
         }
     }
 
@@ -5304,15 +5346,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }
 
             DispatchQueue.main.async {
-                guard self.transferLogWindow?.isVisible == true,
-                      let textView = self.transferLogTextView,
-                      let storage = textView.textStorage else { return }
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .foregroundColor: NSColor.textColor,
-                    .font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-                ]
-                storage.append(NSAttributedString(string: line, attributes: attrs))
-                textView.scrollToEndOfDocument(nil)
+                self.enqueueTransferLogWindowUpdate(line)
             }
         }
     }
