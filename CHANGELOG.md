@@ -2,6 +2,22 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.8] - 2026-08-07
+
+### Opgelost
+
+- Sync herstelt de wijzigingsdatum nu direct nadat ieder afzonderlijk bestand door rsync is afgerond, in plaats van pas na de volledige opdracht.
+- MoveFolders wacht daarbij tot het tijdelijke rsync-bestand op het SMB-doel werkelijk is hernoemd. Hierdoor wordt nooit voortijdig de datum van een nog oud doelbestand aangepast.
+- Als een sync wordt gestopt, blijven alle eerder volledig overgezette bestanden daardoor correct herkenbaar. Een volgende sync bouwt zijn bestandslijst opnieuw op, slaat die bestanden over en gaat verder met het nog onvoltooide deel.
+- Het bestand dat precies tijdens het stoppen werd geschreven blijft via `--partial` bewaard, maar kan bij de volgende sync nog gedeeltelijk of volledig opnieuw moeten worden verwerkt.
+- Een datumreparatie die niet veilig vóór het einde van rsync kon worden uitgevoerd, wordt na een normaal afgeronde opdracht opnieuw geprobeerd. Bij annuleren blijft deze bewust ongemarkeerd, zodat een mogelijk onvolledig bestand nooit ten onrechte als gelijk wordt gezien.
+- Oudere rsync-versies zonder `--out-format` behouden de bestaande veilige datumherstelronde na een volledig afgeronde sync.
+
+### Getest
+
+- Een sync met drie bestanden is na het eerste bestand met rsync-code 20 onderbroken. Het eerste bestand had daarna aantoonbaar dezelfde inhoud, grootte en wijzigingsdatum als de bron; een aansluitende dry-run sloeg dit bestand over en meldde uitsluitend de twee resterende bestanden.
+- Dezelfde proef is uitgevoerd met een reeds bestaand doelbestand met gelijke grootte maar andere inhoud. MoveFolders wachtte op de definitieve rsync-rename en markeerde niet per ongeluk de oude inhoud als actueel.
+
 ## [0.9.7] - 2026-08-07
 
 ### Opgelost

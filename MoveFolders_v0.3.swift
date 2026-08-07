@@ -373,6 +373,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
     lazy var rsyncConfig: RSyncConfig = detectRsyncConfig()
     let rsyncOutFormatMarker = "__MF_CUR__:"
+    let syncCompletedOutFormatMarker = "__MF_SYNC_DONE__:"
 
     var rsyncPath: String { rsyncConfig.path }
 
@@ -730,6 +731,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var repaired: Int
         var failed: Int
         var cancelled: Bool
+    }
+
+    enum SyncTimestampRepairOutcome {
+        case repaired
+        case skipped
+        case failed(String)
     }
 
     func setAppIcon() {
@@ -3346,6 +3353,23 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (code, path)
     }
 
+    func syncCompletedEntry(from line: String) -> (code: String, path: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(syncCompletedOutFormatMarker) else { return nil }
+        let payload = String(trimmed.dropFirst(syncCompletedOutFormatMarker.count))
+        guard let firstSeparator = payload.firstIndex(of: "|") else { return nil }
+        let afterFirst = payload.index(after: firstSeparator)
+        guard let secondSeparator = payload[afterFirst...].firstIndex(of: "|") else { return nil }
+
+        let code = String(payload[..<firstSeparator]).trimmingCharacters(in: .whitespaces)
+        let byteText = String(payload[afterFirst..<secondSeparator]).trimmingCharacters(in: .whitespaces)
+        guard UInt64(byteText) != nil else { return nil }
+        var path = String(payload[payload.index(after: secondSeparator)...])
+        if path.hasPrefix("./") { path.removeFirst(2) }
+        guard !code.isEmpty, !path.isEmpty else { return nil }
+        return (code, path)
+    }
+
     func syncItemizedEntryTransfersContent(_ code: String) -> Bool {
         let characters = Array(code)
         guard characters.count >= 2, characters[1] != "d" else { return false }
@@ -3357,6 +3381,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return characters.count >= 2 && characters[0] == "." && characters[1] != "d"
     }
 
+    func syncItemizedEntryHasTimeDifference(_ code: String) -> Bool {
+        let characters = Array(code)
+        return characters.count > 4 && characters[4] == "t"
+    }
+
     func safeSyncPath(relativePath: String, basePath: String) -> String? {
         let trimmed = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("/") else { return nil }
@@ -3365,28 +3394,108 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (basePath as NSString).appendingPathComponent(trimmed)
     }
 
+    func syncRsyncTemporaryFileState(destinationPath: String, fileManager: FileManager) -> Bool? {
+        let destinationURL = URL(fileURLWithPath: destinationPath)
+        let temporaryPrefix = ".\(destinationURL.lastPathComponent)."
+        do {
+            let siblingNames = try fileManager.contentsOfDirectory(atPath: destinationURL.deletingLastPathComponent().path)
+            return siblingNames.contains { name in
+                name.hasPrefix(temporaryPrefix) && name.count > temporaryPrefix.count
+            }
+        } catch {
+            return nil
+        }
+    }
+
+    func repairSyncModificationDate(
+        relativePath: String,
+        srcBase: String,
+        dstBase: String,
+        waitForRsyncFinalization: Bool = false
+    ) -> SyncTimestampRepairOutcome {
+        guard let sourcePath = safeSyncPath(relativePath: relativePath, basePath: srcBase),
+              let destinationPath = safeSyncPath(relativePath: relativePath, basePath: dstBase) else {
+            return .failed("ongeldig relatief pad")
+        }
+
+        let fm = FileManager.default
+        do {
+            let sourceAttributes = try fm.attributesOfItem(atPath: sourcePath)
+            guard sourceAttributes[.type] as? FileAttributeType == .typeRegular else { return .skipped }
+            guard let sourceSize = sourceAttributes[.size] as? NSNumber else {
+                return .failed("bronbestandsgrootte ontbreekt")
+            }
+            guard let sourceDate = sourceAttributes[.modificationDate] as? Date else {
+                return .failed("bronwijzigingsdatum ontbreekt")
+            }
+
+            let finalizationDeadline = Date().addingTimeInterval(waitForRsyncFinalization ? 15 : 0)
+            var destinationReady = false
+            var lastReason = "doelbestand is nog niet beschikbaar"
+            repeat {
+                do {
+                    let destinationAttributes = try fm.attributesOfItem(atPath: destinationPath)
+                    if destinationAttributes[.type] as? FileAttributeType != .typeRegular {
+                        lastReason = "doel is geen regulier bestand"
+                    } else if let destinationSize = destinationAttributes[.size] as? NSNumber,
+                              destinationSize.uint64Value == sourceSize.uint64Value {
+                        if waitForRsyncFinalization {
+                            switch syncRsyncTemporaryFileState(destinationPath: destinationPath, fileManager: fm) {
+                            case .some(true):
+                                lastReason = "rsync is het doelbestand nog aan het afronden"
+                            case .some(false):
+                                destinationReady = true
+                            case .none:
+                                lastReason = "tijdelijke rsync-status kon niet worden gelezen"
+                            }
+                        } else {
+                            destinationReady = true
+                        }
+                    } else {
+                        lastReason = "bestandsgrootte verschilt; datum niet aangepast"
+                    }
+                } catch {
+                    lastReason = error.localizedDescription
+                }
+
+                if !destinationReady && waitForRsyncFinalization && Date() < finalizationDeadline {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+            } while !destinationReady && waitForRsyncFinalization && Date() < finalizationDeadline
+
+            guard destinationReady else { return .failed(lastReason) }
+            try fm.setAttributes([.modificationDate: sourceDate], ofItemAtPath: destinationPath)
+            let verifiedAttributes = try fm.attributesOfItem(atPath: destinationPath)
+            guard let destinationDate = verifiedAttributes[.modificationDate] as? Date,
+                  abs(destinationDate.timeIntervalSince(sourceDate)) <= timeTolerance else {
+                return .failed("doelschijf hield de wijzigingsdatum niet vast")
+            }
+            return .repaired
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    func recordSyncTimestampRepairFailure(path: String, reason: String, srcBase: String, dstBase: String, profile: SyncProfile) {
+        log("Sync datumherstel mislukt: \(profile.name) | \(path) | \(reason)")
+        recordTransferLog(
+            status: "SYNC DATUMHERSTEL MISLUKT",
+            relativePath: path,
+            srcBase: srcBase,
+            dstBase: dstBase,
+            detail: reason
+        )
+    }
+
     func repairSyncModificationDates(relativePaths: [String], srcBase: String, dstBase: String, profile: SyncProfile) -> SyncTimestampRepairResult {
         guard !relativePaths.isEmpty else {
             return SyncTimestampRepairResult(repaired: 0, failed: 0, cancelled: false)
         }
 
-        let fm = FileManager.default
         var repaired = 0
         var failed = 0
         var lastProgressUpdate = Date.distantPast
         let total = relativePaths.count
-
-        func recordFailure(path: String, reason: String) {
-            failed += 1
-            log("Sync datumherstel mislukt: \(profile.name) | \(path) | \(reason)")
-            recordTransferLog(
-                status: "SYNC DATUMHERSTEL MISLUKT",
-                relativePath: path,
-                srcBase: srcBase,
-                dstBase: dstBase,
-                detail: reason
-            )
-        }
 
         log("Sync datumherstel gestart: \(profile.name) | \(total) overgezette items controleren")
         for (index, relativePath) in relativePaths.enumerated() {
@@ -3400,41 +3509,14 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 lastProgressUpdate = now
             }
 
-            guard let sourcePath = safeSyncPath(relativePath: relativePath, basePath: srcBase),
-                  let destinationPath = safeSyncPath(relativePath: relativePath, basePath: dstBase) else {
-                recordFailure(path: relativePath, reason: "ongeldig relatief pad")
-                continue
-            }
-
-            do {
-                let sourceAttributes = try fm.attributesOfItem(atPath: sourcePath)
-                guard sourceAttributes[.type] as? FileAttributeType == .typeRegular else { continue }
-                let destinationAttributes = try fm.attributesOfItem(atPath: destinationPath)
-                guard destinationAttributes[.type] as? FileAttributeType == .typeRegular else {
-                    recordFailure(path: relativePath, reason: "doel is geen regulier bestand")
-                    continue
-                }
-                guard let sourceSize = sourceAttributes[.size] as? NSNumber,
-                      let destinationSize = destinationAttributes[.size] as? NSNumber,
-                      sourceSize.uint64Value == destinationSize.uint64Value else {
-                    recordFailure(path: relativePath, reason: "bestandsgrootte verschilt; datum niet aangepast")
-                    continue
-                }
-                guard let sourceDate = sourceAttributes[.modificationDate] as? Date else {
-                    recordFailure(path: relativePath, reason: "bronwijzigingsdatum ontbreekt")
-                    continue
-                }
-
-                try fm.setAttributes([.modificationDate: sourceDate], ofItemAtPath: destinationPath)
-                let verifiedAttributes = try fm.attributesOfItem(atPath: destinationPath)
-                guard let destinationDate = verifiedAttributes[.modificationDate] as? Date,
-                      abs(destinationDate.timeIntervalSince(sourceDate)) <= timeTolerance else {
-                    recordFailure(path: relativePath, reason: "doelschijf hield de wijzigingsdatum niet vast")
-                    continue
-                }
+            switch repairSyncModificationDate(relativePath: relativePath, srcBase: srcBase, dstBase: dstBase) {
+            case .repaired:
                 repaired += 1
-            } catch {
-                recordFailure(path: relativePath, reason: error.localizedDescription)
+            case .skipped:
+                continue
+            case .failed(let reason):
+                failed += 1
+                recordSyncTimestampRepairFailure(path: relativePath, reason: reason, srcBase: srcBase, dstBase: dstBase, profile: profile)
             }
         }
 
@@ -3515,15 +3597,22 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
         let srcArg = srcPath.hasSuffix("/") ? srcPath : "\(srcPath)/"
         let dstArg = dstPath.hasSuffix("/") ? dstPath : "\(dstPath)/"
+        let repairsTimestampsImmediately = rsyncConfig.supportsOutFormat
         var flags = rsyncFlags(
             includePartial: true,
-            includeItemize: true,
+            includeItemize: !repairsTimestampsImmediately,
             includeProgress: true,
             includeStats: true,
             includeXattrs: profile.copyXattrs,
             includePermissions: false,
             includeDelete: profile.deleteExtra
         )
+        if repairsTimestampsImmediately {
+            flags += " --out-format='\(syncCompletedOutFormatMarker)%i|%b|%n'"
+            log("Sync \(profile.name): wijzigingsdatums worden direct na ieder afgerond bestand hersteld")
+        } else {
+            log("Sync \(profile.name): rsync mist --out-format; datumherstel volgt na de volledige opdracht")
+        }
         if let unicodeNormalizationFlag = syncUnicodeNormalizationFlag(forDestinationPath: dstPath) {
             flags += " \(unicodeNormalizationFlag)"
             log("Sync \(profile.name): Unicode-normalisatie voor netwerkschijf ingeschakeld (UTF-8 -> UTF-8-MAC)")
@@ -3535,6 +3624,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var transferred = 0
         var deleted = 0
         var metadataOnly = 0
+        var timestampRepaired = 0
+        var pendingTimestampPaths: [String] = []
         var loggedSyncPaths: Set<String> = []
         var transferredPaths: [String] = []
         let result = runCommandStreaming(
@@ -3550,7 +3641,68 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         ) { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
-            if trimmed.hasPrefix("*deleting") {
+            if let completedEntry = self.syncCompletedEntry(from: trimmed) {
+                if completedEntry.code == "*deleting" {
+                    let shouldLog = countQueue.sync { () -> Bool in
+                        let inserted = loggedSyncPaths.insert("delete:\(completedEntry.path)").inserted
+                        if inserted { deleted += 1 }
+                        return inserted
+                    }
+                    if shouldLog {
+                        self.recordTransferLog(status: "SYNC VERWIJDERD", relativePath: completedEntry.path, dstBase: dstPath, detail: "profiel: \(profile.name)")
+                    }
+                } else if self.syncItemizedEntryTransfersContent(completedEntry.code) {
+                    let shouldProcess = countQueue.sync { () -> Bool in
+                        let inserted = loggedSyncPaths.insert("copy:\(completedEntry.path)").inserted
+                        if inserted { transferred += 1 }
+                        return inserted
+                    }
+                    if shouldProcess {
+                        self.recordTransferLog(status: "SYNC OVERGEZET", relativePath: completedEntry.path, srcBase: srcPath, dstBase: dstPath, detail: "profiel: \(profile.name) | rsync: \(completedEntry.code)")
+                        switch self.repairSyncModificationDate(
+                            relativePath: completedEntry.path,
+                            srcBase: srcPath,
+                            dstBase: dstPath,
+                            waitForRsyncFinalization: true
+                        ) {
+                        case .repaired:
+                            countQueue.sync { timestampRepaired += 1 }
+                        case .skipped:
+                            break
+                        case .failed(let reason):
+                            countQueue.sync { pendingTimestampPaths.append(completedEntry.path) }
+                            self.log("Sync datumherstel uitgesteld tot na rsync: \(profile.name) | \(completedEntry.path) | \(reason)")
+                        }
+                    }
+                } else if self.syncItemizedEntryIsMetadataOnly(completedEntry.code) {
+                    let shouldLog = countQueue.sync { () -> Bool in
+                        let inserted = loggedSyncPaths.insert("metadata:\(completedEntry.path)").inserted
+                        if inserted { metadataOnly += 1 }
+                        return inserted
+                    }
+                    if shouldLog {
+                        self.recordTransferLog(status: "SYNC NIET OVERGEZET", relativePath: completedEntry.path, srcBase: srcPath, dstBase: dstPath, detail: "inhoud was al gelijk; alleen metadata/attributen weken af | rsync: \(completedEntry.code)")
+                        if self.syncItemizedEntryHasTimeDifference(completedEntry.code) {
+                            switch self.repairSyncModificationDate(
+                                relativePath: completedEntry.path,
+                                srcBase: srcPath,
+                                dstBase: dstPath,
+                                waitForRsyncFinalization: true
+                            ) {
+                            case .repaired:
+                                countQueue.sync { timestampRepaired += 1 }
+                            case .skipped:
+                                break
+                            case .failed(let reason):
+                                countQueue.sync { pendingTimestampPaths.append(completedEntry.path) }
+                                self.log("Sync datumherstel uitgesteld tot na rsync: \(profile.name) | \(completedEntry.path) | \(reason)")
+                            }
+                        }
+                    }
+                }
+                self.log("Sync \(profile.name): \(trimmed)")
+                return
+            } else if trimmed.hasPrefix("*deleting") {
                 countQueue.sync { deleted += 1 }
                 if let path = self.syncProgressDetail(fromRsyncLine: trimmed) {
                     let cleanPath = path.replacingOccurrences(of: "*deleting", with: "").trimmingCharacters(in: .whitespaces)
@@ -3564,7 +3716,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                     let shouldLog = countQueue.sync { () -> Bool in
                         transferred += 1
                         let inserted = loggedSyncPaths.insert("copy:\(entry.path)").inserted
-                        if inserted { transferredPaths.append(entry.path) }
+                        if inserted, !repairsTimestampsImmediately { transferredPaths.append(entry.path) }
                         return inserted
                     }
                     if shouldLog {
@@ -3586,15 +3738,37 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }
             self.log("Sync \(profile.name): \(trimmed)")
         }
-        let snapshot = countQueue.sync { (transferred, deleted, metadataOnly, transferredPaths) }
-        var timestampRepair = SyncTimestampRepairResult(repaired: 0, failed: 0, cancelled: false)
-        if !syncCancellationRequested(for: profile.id), !result.timedOut {
+        let snapshot = countQueue.sync { (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths) }
+        var timestampRepair = SyncTimestampRepairResult(repaired: snapshot.4, failed: 0, cancelled: false)
+        if !repairsTimestampsImmediately, !syncCancellationRequested(for: profile.id), !result.timedOut {
             timestampRepair = repairSyncModificationDates(
                 relativePaths: snapshot.3,
                 srcBase: srcPath,
                 dstBase: dstPath,
                 profile: profile
             )
+        } else if repairsTimestampsImmediately,
+                  !snapshot.5.isEmpty,
+                  !syncCancellationRequested(for: profile.id),
+                  !result.timedOut {
+            let delayedRepair = repairSyncModificationDates(
+                relativePaths: snapshot.5,
+                srcBase: srcPath,
+                dstBase: dstPath,
+                profile: profile
+            )
+            timestampRepair.repaired += delayedRepair.repaired
+            timestampRepair.failed += delayedRepair.failed
+            timestampRepair.cancelled = delayedRepair.cancelled
+        } else if repairsTimestampsImmediately && !snapshot.5.isEmpty {
+            let detail = "\(snapshot.5.count) nog niet afgeronde datumreparaties worden bij de volgende sync opnieuw gecontroleerd"
+            log("Sync datumherstel onderbroken: \(profile.name) | \(detail)")
+            recordTransferLog(status: "SYNC DATUMHERSTEL UITGESTELD", relativePath: profile.name, detail: detail)
+        }
+        if repairsTimestampsImmediately && (timestampRepair.repaired > 0 || timestampRepair.failed > 0) {
+            let detail = "\(timestampRepair.repaired) wijzigingsdatums direct hersteld, \(timestampRepair.failed) mislukt"
+            log("Sync direct datumherstel klaar: \(profile.name) | \(detail)")
+            recordTransferLog(status: "SYNC DATUMHERSTEL KLAAR", relativePath: profile.name, detail: detail)
         }
 
         if syncCancellationRequested(for: profile.id) || timestampRepair.cancelled {
