@@ -507,6 +507,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     var syncEnabledCheckbox: NSButton!
     var syncDeleteExtraCheckbox: NSButton!
     var syncXattrsCheckbox: NSButton!
+    var syncAutoReconnectCheckbox: NSButton!
     var chooseSyncSrcButton: NSButton!
     var chooseSyncDstButton: NSButton!
     var syncProgressTitleLabel: NSTextField!
@@ -567,6 +568,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     var lastResumeJob: ResumableTransferJob?
     var syncProfiles: [SyncProfile] = []
     var syncRunningProfileIds: Set<String> = []
+    var syncReconnectLastAttempt: [String: Date] = [:]
     var syncTimer: DispatchSourceTimer?
     var selectedSyncProfileId: String?
     var syncProgressStates: [String: SyncProgressState] = [:]
@@ -582,6 +584,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     let favoritePresetLimit = 20
     let resumeStateQueue = DispatchQueue(label: "MoveFolders.resumeState")
     let syncStateQueue = DispatchQueue(label: "MoveFolders.syncState")
+    let syncReconnectInterval: TimeInterval = 5 * 60
     let pendingCleanupStateQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.state")
     var pendingCleanupPaths: Set<String> = []
     let transferControlQueue = DispatchQueue(label: "MoveFolders.transferControl")
@@ -674,10 +677,20 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         var enabled: Bool
         var deleteExtra: Bool
         var copyXattrs: Bool
+        var autoReconnect: Bool?
+        var srcRemountURL: String?
+        var srcRelativePathOnVolume: String?
+        var dstRemountURL: String?
+        var dstRelativePathOnVolume: String?
         var lastRunAt: Date?
         var lastStatus: String
         var consecutiveFailures: Int
         var updatedAt: Date
+    }
+
+    struct NetworkMountInfo {
+        let remountURL: String
+        let relativePath: String
     }
 
     struct SyncProgressState {
@@ -944,6 +957,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
         syncXattrsCheckbox.autoresizingMask = []
         syncContent.addSubview(syncXattrsCheckbox)
+        syncAutoReconnectCheckbox = NSButton(checkboxWithTitle: "Netwerkschijven elke 5 minuten verbinden", target: nil, action: nil)
+        syncAutoReconnectCheckbox.state = .on
+        syncAutoReconnectCheckbox.autoresizingMask = []
+        syncContent.addSubview(syncAutoReconnectCheckbox)
         syncProgressTitleLabel = NSTextField(labelWithString: "Voortgang: geen sync actief")
         syncProgressTitleLabel.lineBreakMode = .byTruncatingMiddle
         syncProgressTitleLabel.autoresizingMask = []
@@ -1195,8 +1212,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         syncEnabledCheckbox.frame = NSRect(x: fieldX + 105, y: optionsY, width: 180, height: 22)
         syncDeleteExtraCheckbox.frame = NSRect(x: fieldX, y: optionsY - 34, width: 290, height: 22)
         syncXattrsCheckbox.frame = NSRect(x: fieldX, y: optionsY - 66, width: 320, height: 22)
+        syncAutoReconnectCheckbox.frame = NSRect(x: fieldX, y: optionsY - 98, width: 360, height: 22)
 
-        let progressY = max(72, optionsY - 185)
+        let progressY = max(72, optionsY - 215)
         syncProgressTitleLabel.frame = NSRect(x: margin, y: progressY + 68, width: width - (2 * margin), height: 20)
         syncProgressBar.frame = NSRect(x: margin, y: progressY + 46, width: width - (2 * margin), height: 12)
         syncProgressDetailLabel.frame = NSRect(x: margin, y: progressY + 20, width: width - (2 * margin), height: 20)
@@ -1338,6 +1356,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         syncEnabledCheckbox.state = .on
         syncDeleteExtraCheckbox.state = .off
         syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
+        syncAutoReconnectCheckbox.state = .on
         refreshSyncProfileMenu()
         updateSyncStatusLabel(profile: nil)
         renderSyncProgress(for: nil)
@@ -1359,6 +1378,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         let interval = max(1, Int(syncIntervalField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 15)
         syncIntervalField.stringValue = "\(interval)"
         let id = existing?.id ?? UUID().uuidString
+        let srcMountInfo = networkMountInfo(forPath: srcPath)
+        let dstMountInfo = networkMountInfo(forPath: dstPath)
+        let sourcePathUnchanged = existing.map { normalizePath($0.srcPath) == srcPath } ?? false
+        let destinationPathUnchanged = existing.map { normalizePath($0.dstPath) == dstPath } ?? false
         let profile = SyncProfile(
             id: id,
             name: name,
@@ -1368,6 +1391,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
             enabled: syncEnabledCheckbox.state == .on,
             deleteExtra: syncDeleteExtraCheckbox.state == .on,
             copyXattrs: syncXattrsCheckbox.state == .on,
+            autoReconnect: syncAutoReconnectCheckbox.state == .on,
+            srcRemountURL: srcMountInfo?.remountURL ?? (sourcePathUnchanged ? existing?.srcRemountURL : nil),
+            srcRelativePathOnVolume: srcMountInfo?.relativePath ?? (sourcePathUnchanged ? existing?.srcRelativePathOnVolume : nil),
+            dstRemountURL: dstMountInfo?.remountURL ?? (destinationPathUnchanged ? existing?.dstRemountURL : nil),
+            dstRelativePathOnVolume: dstMountInfo?.relativePath ?? (destinationPathUnchanged ? existing?.dstRelativePathOnVolume : nil),
             lastRunAt: existing?.lastRunAt,
             lastStatus: existing?.lastStatus ?? "Nog niet gesynct",
             consecutiveFailures: existing?.consecutiveFailures ?? 0,
@@ -1397,8 +1425,26 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
     }
 
     @objc func runSelectedSyncProfileNow() {
-        guard let profile = selectedSyncProfile() else {
+        guard let selectedProfile = selectedSyncProfile() else {
             alert("Selecteer eerst een sync-profiel.")
+            return
+        }
+        let profile = resolveAndCaptureNetworkPaths(for: selectedProfile)
+        guard syncProfilePathsAvailable(profile) else {
+            let status = syncWaitingStatus(for: profile)
+            showSyncWaiting(profile: profile, status: status)
+            let requested = syncAutoReconnectEnabled(for: profile) && attemptNetworkReconnect(for: profile, force: true)
+            if requested {
+                if profile.enabled {
+                    alert("MoveFolders heeft macOS gevraagd de ontbrekende netwerkschijf opnieuw te verbinden. De app blijft controleren en start de sync zodra Folder A en Folder B beschikbaar zijn en het profiel aan de beurt is.")
+                } else {
+                    alert("MoveFolders heeft macOS gevraagd de ontbrekende netwerkschijf opnieuw te verbinden. Dit profiel staat uit; klik opnieuw op ‘Sync nu’ zodra Folder A en Folder B beschikbaar zijn.")
+                }
+            } else if syncAutoReconnectEnabled(for: profile) {
+                alert("De netwerkschijf kan nog niet automatisch worden verbonden. Koppel de share één keer handmatig en bewaar het sync-profiel opnieuw; daarna kan MoveFolders de verbinding onthouden.")
+            } else {
+                alert("Folder A of Folder B is niet beschikbaar. Automatisch verbinden staat voor dit profiel uit.")
+            }
             return
         }
         startSyncRun(profile: profile, manual: true)
@@ -2222,6 +2268,143 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         syncEnabledCheckbox.state = profile.enabled ? .on : .off
         syncDeleteExtraCheckbox.state = profile.deleteExtra ? .on : .off
         syncXattrsCheckbox.state = profile.copyXattrs ? .on : .off
+        syncAutoReconnectCheckbox.state = (profile.autoReconnect ?? true) ? .on : .off
+    }
+
+    func syncAutoReconnectEnabled(for profile: SyncProfile) -> Bool {
+        profile.autoReconnect ?? true
+    }
+
+    func directoryExists(atPath path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: normalizePath(path), isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    func sanitizedRemountURL(_ url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        components.password = nil
+        return components.url
+    }
+
+    func canonicalRemountKey(_ url: URL) -> String {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString.lowercased()
+        }
+        let scheme = components.scheme?.lowercased() ?? ""
+        let user = components.user?.lowercased() ?? ""
+        let host = components.host?.lowercased() ?? ""
+        let port = components.port.map(String.init) ?? ""
+        let path = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        return "\(scheme)|\(user)|\(host)|\(port)|\(path)"
+    }
+
+    func networkMountInfo(forPath path: String) -> NetworkMountInfo? {
+        let normalizedPath = normalizePath(path)
+        guard directoryExists(atPath: normalizedPath) else { return nil }
+        let pathURL = URL(fileURLWithPath: normalizedPath, isDirectory: true).standardizedFileURL
+        guard let values = try? pathURL.resourceValues(forKeys: [.volumeURLKey, .volumeURLForRemountingKey]),
+              let volumeURL = values.volume?.standardizedFileURL,
+              let rawRemountURL = values.volumeURLForRemounting,
+              let remountURL = sanitizedRemountURL(rawRemountURL) else { return nil }
+
+        let volumePath = normalizePath(volumeURL.path)
+        let requestedPath = normalizePath(pathURL.path)
+        let relativePath: String
+        if requestedPath == volumePath {
+            relativePath = ""
+        } else if requestedPath.hasPrefix(volumePath + "/") {
+            relativePath = String(requestedPath.dropFirst(volumePath.count + 1))
+        } else {
+            return nil
+        }
+        return NetworkMountInfo(remountURL: remountURL.absoluteString, relativePath: relativePath)
+    }
+
+    func mountedVolumeURL(forRemountURLString remountURLString: String) -> URL? {
+        guard let rawURL = URL(string: remountURLString),
+              let remountURL = sanitizedRemountURL(rawURL) else { return nil }
+        let expectedKey = canonicalRemountKey(remountURL)
+        let keys: [URLResourceKey] = [.volumeURLForRemountingKey]
+        let mountedVolumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: []) ?? []
+        for volumeURL in mountedVolumes {
+            guard let values = try? volumeURL.resourceValues(forKeys: Set(keys)),
+                  let candidateRawURL = values.volumeURLForRemounting,
+                  let candidateURL = sanitizedRemountURL(candidateRawURL),
+                  canonicalRemountKey(candidateURL) == expectedKey else { continue }
+            return volumeURL.standardizedFileURL
+        }
+        return nil
+    }
+
+    func resolvedMountedPath(remountURLString: String?, relativePath: String?) -> String? {
+        guard let remountURLString = remountURLString,
+              let volumeURL = mountedVolumeURL(forRemountURLString: remountURLString) else { return nil }
+        let candidateURL: URL
+        if let relativePath = relativePath, !relativePath.isEmpty {
+            candidateURL = volumeURL.appendingPathComponent(relativePath, isDirectory: true)
+        } else {
+            candidateURL = volumeURL
+        }
+        let candidatePath = normalizePath(candidateURL.path)
+        return directoryExists(atPath: candidatePath) ? candidatePath : nil
+    }
+
+    func resolveAndCaptureNetworkPaths(for original: SyncProfile) -> SyncProfile {
+        var resolved = original
+
+        if directoryExists(atPath: resolved.srcPath) {
+            if let info = networkMountInfo(forPath: resolved.srcPath) {
+                resolved.srcRemountURL = info.remountURL
+                resolved.srcRelativePathOnVolume = info.relativePath
+            }
+        } else if let path = resolvedMountedPath(remountURLString: resolved.srcRemountURL,
+                                                  relativePath: resolved.srcRelativePathOnVolume) {
+            resolved.srcPath = path
+        }
+
+        if directoryExists(atPath: resolved.dstPath) {
+            if let info = networkMountInfo(forPath: resolved.dstPath) {
+                resolved.dstRemountURL = info.remountURL
+                resolved.dstRelativePathOnVolume = info.relativePath
+            }
+        } else if let path = resolvedMountedPath(remountURLString: resolved.dstRemountURL,
+                                                  relativePath: resolved.dstRelativePathOnVolume) {
+            resolved.dstPath = path
+        }
+
+        if resolved.srcPath != original.srcPath ||
+            resolved.dstPath != original.dstPath ||
+            resolved.srcRemountURL != original.srcRemountURL ||
+            resolved.srcRelativePathOnVolume != original.srcRelativePathOnVolume ||
+            resolved.dstRemountURL != original.dstRemountURL ||
+            resolved.dstRelativePathOnVolume != original.dstRelativePathOnVolume {
+            persistResolvedSyncProfile(resolved, previous: original)
+        }
+        return resolved
+    }
+
+    func persistResolvedSyncProfile(_ resolved: SyncProfile, previous: SyncProfile) {
+        DispatchQueue.main.async {
+            guard let idx = self.syncProfiles.firstIndex(where: { $0.id == resolved.id }),
+                  self.syncProfiles[idx].updatedAt == previous.updatedAt else { return }
+            let sourceFieldStillMatches = self.normalizePath(self.syncSrcField?.stringValue ?? "") == self.normalizePath(previous.srcPath)
+            let destinationFieldStillMatches = self.normalizePath(self.syncDstField?.stringValue ?? "") == self.normalizePath(previous.dstPath)
+            self.syncProfiles[idx].srcPath = resolved.srcPath
+            self.syncProfiles[idx].dstPath = resolved.dstPath
+            self.syncProfiles[idx].srcRemountURL = resolved.srcRemountURL
+            self.syncProfiles[idx].srcRelativePathOnVolume = resolved.srcRelativePathOnVolume
+            self.syncProfiles[idx].dstRemountURL = resolved.dstRemountURL
+            self.syncProfiles[idx].dstRelativePathOnVolume = resolved.dstRelativePathOnVolume
+            self.saveSyncProfiles()
+            if self.selectedSyncProfileId == resolved.id {
+                if sourceFieldStillMatches { self.syncSrcField.stringValue = resolved.srcPath }
+                if destinationFieldStillMatches { self.syncDstField.stringValue = resolved.dstPath }
+                self.updateSyncStatusLabel(profile: resolved)
+            }
+            if resolved.srcPath != previous.srcPath || resolved.dstPath != previous.dstPath {
+                self.log("Sync-profiel gebruikt opnieuw gekoppelde schijf: \(resolved.name) | \(resolved.srcPath) -> \(resolved.dstPath)")
+            }
+        }
     }
 
     func refreshSyncProfileMenu() {
@@ -2306,6 +2489,108 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         return DispatchQueue.main.sync { syncProfiles }
     }
 
+    func syncProfilePathsAvailable(_ profile: SyncProfile) -> Bool {
+        directoryExists(atPath: profile.srcPath) && directoryExists(atPath: profile.dstPath)
+    }
+
+    func syncWaitingStatus(for profile: SyncProfile) -> String {
+        var missing: [String] = []
+        var reconnectDataMissing = false
+        if !directoryExists(atPath: profile.srcPath) {
+            missing.append("Folder A")
+            reconnectDataMissing = reconnectDataMissing || profile.srcRemountURL == nil
+        }
+        if !directoryExists(atPath: profile.dstPath) {
+            missing.append("Folder B")
+            reconnectDataMissing = reconnectDataMissing || profile.dstRemountURL == nil
+        }
+        let names = missing.joined(separator: " en ")
+        if !profile.enabled {
+            return "Wacht op \(names); dit sync-profiel staat uit."
+        }
+        if !syncAutoReconnectEnabled(for: profile) {
+            return "Wacht op \(names); automatisch verbinden staat uit."
+        }
+        if reconnectDataMissing {
+            return "Wacht op \(names); koppel de share één keer handmatig en bewaar dit profiel opnieuw."
+        }
+        return "Wacht op \(names); nieuwe koppelpoging elke 5 minuten."
+    }
+
+    func showSyncWaiting(profile: SyncProfile, status: String) {
+        DispatchQueue.main.async {
+            if let idx = self.syncProfiles.firstIndex(where: { $0.id == profile.id }),
+               self.syncProfiles[idx].lastStatus != status {
+                self.syncProfiles[idx].lastStatus = status
+                self.saveSyncProfiles()
+            }
+            self.syncProgressStates[profile.id] = SyncProgressState(
+                percent: 0,
+                speed: "",
+                eta: "",
+                detail: status,
+                status: status,
+                isRunning: false,
+                succeeded: nil
+            )
+            if self.selectedSyncProfileId == profile.id {
+                let current = self.syncProfiles.first(where: { $0.id == profile.id }) ?? profile
+                self.updateSyncStatusLabel(profile: current)
+                self.renderSyncProgress(for: current)
+            }
+        }
+    }
+
+    func openReconnectURL(_ url: URL) -> Bool {
+        if Thread.isMainThread {
+            return NSWorkspace.shared.open(url)
+        }
+        return DispatchQueue.main.sync {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func attemptNetworkReconnect(for profile: SyncProfile, force: Bool) -> Bool {
+        var candidates: [(label: String, urlString: String)] = []
+        if !directoryExists(atPath: profile.srcPath), let url = profile.srcRemountURL {
+            candidates.append(("Folder A", url))
+        }
+        if !directoryExists(atPath: profile.dstPath), let url = profile.dstRemountURL {
+            candidates.append(("Folder B", url))
+        }
+
+        var seen = Set<String>()
+        var requested = false
+        for candidate in candidates {
+            guard let rawURL = URL(string: candidate.urlString),
+                  let url = sanitizedRemountURL(rawURL) else { continue }
+            let key = canonicalRemountKey(url)
+            guard seen.insert(key).inserted else { continue }
+            let now = Date()
+            let shouldAttempt = syncStateQueue.sync { () -> Bool in
+                if !force,
+                   let lastAttempt = syncReconnectLastAttempt[key],
+                   now.timeIntervalSince(lastAttempt) < syncReconnectInterval {
+                    return false
+                }
+                syncReconnectLastAttempt[key] = now
+                return true
+            }
+            guard shouldAttempt else { continue }
+
+            let opened = openReconnectURL(url)
+            requested = requested || opened
+            let result = opened ? "koppelpoging aangevraagd" : "macOS kon de koppelpoging niet starten"
+            log("Netwerkschijf verbinden: \(profile.name) | \(candidate.label) | \(result)")
+            recordTransferLog(
+                status: opened ? "NETWERKSCHIJF KOPPELEN" : "NETWERKSCHIJF KOPPELEN MISLUKT",
+                relativePath: profile.name,
+                detail: "\(candidate.label): \(result)"
+            )
+        }
+        return requested
+    }
+
     func startSyncScheduler() {
         syncTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
@@ -2320,8 +2605,18 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
 
     func tickSyncProfiles() {
         let now = Date()
-        for profile in syncProfilesSnapshot() where syncProfileIsDue(profile, now: now) {
-            startSyncRun(profile: profile, manual: false)
+        for original in syncProfilesSnapshot() where original.enabled {
+            let profile = resolveAndCaptureNetworkPaths(for: original)
+            guard syncProfilePathsAvailable(profile) else {
+                showSyncWaiting(profile: profile, status: syncWaitingStatus(for: profile))
+                if syncAutoReconnectEnabled(for: profile) {
+                    _ = attemptNetworkReconnect(for: profile, force: false)
+                }
+                continue
+            }
+            if syncProfileIsDue(profile, now: now) {
+                startSyncRun(profile: profile, manual: false)
+            }
         }
     }
 
@@ -2438,6 +2733,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         let stateText: String
         if state.isRunning {
             stateText = "\(state.percent)%"
+        } else if state.succeeded == nil {
+            stateText = "wacht"
         } else {
             stateText = state.succeeded == true ? "klaar" : "gestopt"
         }
@@ -2524,11 +2821,21 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate {
         let dstPath = normalizePath(profile.dstPath)
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: srcPath, isDirectory: &isDir), isDir.boolValue else {
+            if syncAutoReconnectEnabled(for: profile) {
+                showSyncWaiting(profile: profile, status: syncWaitingStatus(for: profile))
+                _ = attemptNetworkReconnect(for: profile, force: false)
+                return
+            }
             finishSyncProfile(profile, success: false, status: "Folder A bestaat niet of is niet gekoppeld: \(srcPath)")
             return
         }
         var dstIsDir: ObjCBool = false
         guard fm.fileExists(atPath: dstPath, isDirectory: &dstIsDir), dstIsDir.boolValue else {
+            if syncAutoReconnectEnabled(for: profile) {
+                showSyncWaiting(profile: profile, status: syncWaitingStatus(for: profile))
+                _ = attemptNetworkReconnect(for: profile, force: false)
+                return
+            }
             finishSyncProfile(profile, success: false, status: "Folder B bestaat niet of is niet gekoppeld: \(dstPath)")
             return
         }

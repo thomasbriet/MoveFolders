@@ -2,6 +2,23 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.8.9] - 2026-08-07
+
+### Toegevoegd
+
+- Sync-profielen hebben standaard de optie `Netwerkschijven elke 5 minuten verbinden` ingeschakeld.
+- MoveFolders bewaart per bereikbare netwerkbron en -doel de veilige macOS-remountinformatie en vraagt macOS bij uitval iedere vijf minuten opnieuw te verbinden.
+- Het syncschema gaat automatisch verder zodra Folder A en Folder B weer beschikbaar zijn, zonder een tijdelijk ontbrekende share als mislukte sync te tellen.
+- Het syncscherm en het doorlopende log tonen voortaan dat een profiel op een netwerkschijf wacht en wanneer een koppelpoging is aangevraagd.
+
+### Opgelost
+
+- Opnieuw gekoppelde shares met een door macOS toegevoegde suffix zoals `-1` of `-2` worden herkend; het opgeslagen pad wordt naar de werkelijk gekoppelde volumenaam bijgewerkt.
+
+### Beveiliging
+
+- MoveFolders bewaart geen netwerkwachtwoorden. De app gebruikt de remount-URL zonder wachtwoord en laat authenticatie aan macOS Sleutelhanger over.
+
 ## [0.8.8] - 2026-08-05
 
 ### Opgelost
