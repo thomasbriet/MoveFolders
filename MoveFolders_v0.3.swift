@@ -734,6 +734,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var cancelled: Bool
     }
 
+    struct DirectoryTimestampRepairFailure {
+        let path: String
+        let reason: String
+    }
+
+    struct DirectoryTimestampRepairResult {
+        var repaired: Int
+        var failures: [DirectoryTimestampRepairFailure]
+        var cancelled: Bool
+    }
+
     enum SyncTimestampRepairOutcome {
         case repaired
         case skipped
@@ -3366,7 +3377,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         guard codeCharacters.count >= 2,
               codeCharacters[0] == ">" || codeCharacters[0] == "<" || codeCharacters[0] == "c" || codeCharacters[0] == "h" || codeCharacters[0] == "." else { return nil }
         var path = String(parts[1]).trimmingCharacters(in: .whitespaces)
-        if path.hasPrefix("./") { path.removeFirst(2) }
+        if path == "./" { path = "." }
+        else if path.hasPrefix("./") { path.removeFirst(2) }
         guard !path.isEmpty else { return nil }
         return (code, path)
     }
@@ -3379,7 +3391,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
         let code = String(payload[..<separator]).trimmingCharacters(in: .whitespaces)
         var path = String(payload[payload.index(after: separator)...])
-        if path.hasPrefix("./") { path.removeFirst(2) }
+        if path == "./" { path = "." }
+        else if path.hasPrefix("./") { path.removeFirst(2) }
         guard !code.isEmpty, !path.isEmpty else { return nil }
         return (code, path)
     }
@@ -3395,6 +3408,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return characters.count >= 2 && characters[0] == "." && characters[1] != "d"
     }
 
+    func syncItemizedEntryIsDirectory(_ code: String) -> Bool {
+        let characters = Array(code)
+        return characters.count >= 2 && characters[0] != "*" && characters[1] == "d"
+    }
+
     func syncItemizedEntryHasTimeDifference(_ code: String) -> Bool {
         let characters = Array(code)
         return characters.count > 4 && characters[4] == "t"
@@ -3406,6 +3424,112 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let components = trimmed.split(separator: "/", omittingEmptySubsequences: false)
         guard !components.contains(where: { $0 == ".." }) else { return nil }
         return (basePath as NSString).appendingPathComponent(trimmed)
+    }
+
+    func directoryPathDepth(_ relativePath: String) -> Int {
+        if relativePath == "." { return 0 }
+        return relativePath.split(separator: "/", omittingEmptySubsequences: true).count
+    }
+
+    func affectedDirectoryPaths(relativePath: String, includePathItself: Bool) -> Set<String> {
+        var cleanPath = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        while cleanPath.hasSuffix("/") { cleanPath.removeLast() }
+        guard !cleanPath.isEmpty, !cleanPath.hasPrefix("/") else { return [] }
+        if cleanPath == "." { return ["."] }
+
+        let components = cleanPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !components.contains(".."), !components.contains("") else { return [] }
+        let directoryComponentCount = includePathItself ? components.count : max(0, components.count - 1)
+        var result: Set<String> = ["."]
+        if directoryComponentCount > 0 {
+            for count in 1...directoryComponentCount {
+                result.insert(components.prefix(count).joined(separator: "/"))
+            }
+        }
+        return result
+    }
+
+    func sourceDirectoryRelativePaths(items: [String], srcBase: String) -> [String] {
+        let fm = FileManager.default
+        var result = Set<String>()
+        for item in items {
+            if isTransferCancelRequested() { break }
+            let sourceRoot = (srcBase as NSString).appendingPathComponent(item)
+            guard let sourceAttributes = try? fm.attributesOfItem(atPath: sourceRoot),
+                  sourceAttributes[.type] as? FileAttributeType == .typeDirectory else { continue }
+            result.insert(item)
+            guard let enumerator = fm.enumerator(atPath: sourceRoot) else { continue }
+            for case let child as String in enumerator {
+                if isTransferCancelRequested() { break }
+                let childPath = (sourceRoot as NSString).appendingPathComponent(child)
+                if let childAttributes = try? fm.attributesOfItem(atPath: childPath),
+                   childAttributes[.type] as? FileAttributeType == .typeDirectory {
+                    result.insert((item as NSString).appendingPathComponent(child))
+                }
+            }
+        }
+        return result.sorted {
+            let leftDepth = directoryPathDepth($0)
+            let rightDepth = directoryPathDepth($1)
+            return leftDepth == rightDepth ? $0 < $1 : leftDepth > rightDepth
+        }
+    }
+
+    func repairDirectoryModificationDates(
+        relativePaths: [String],
+        srcBase: String,
+        dstBase: String,
+        shouldCancel: () -> Bool,
+        progress: ((Int, Int, String) -> Void)? = nil
+    ) -> DirectoryTimestampRepairResult {
+        let sortedPaths = Array(Set(relativePaths)).sorted {
+            let leftDepth = directoryPathDepth($0)
+            let rightDepth = directoryPathDepth($1)
+            return leftDepth == rightDepth ? $0 < $1 : leftDepth > rightDepth
+        }
+        guard !sortedPaths.isEmpty else {
+            return DirectoryTimestampRepairResult(repaired: 0, failures: [], cancelled: false)
+        }
+
+        let fm = FileManager.default
+        var repaired = 0
+        var failures: [DirectoryTimestampRepairFailure] = []
+        for (index, relativePath) in sortedPaths.enumerated() {
+            if shouldCancel() {
+                return DirectoryTimestampRepairResult(repaired: repaired, failures: failures, cancelled: true)
+            }
+            progress?(index + 1, sortedPaths.count, relativePath)
+            guard let sourcePath = safeSyncPath(relativePath: relativePath, basePath: srcBase),
+                  let destinationPath = safeSyncPath(relativePath: relativePath, basePath: dstBase) else {
+                failures.append(DirectoryTimestampRepairFailure(path: relativePath, reason: "ongeldig relatief pad"))
+                continue
+            }
+
+            do {
+                let sourceAttributes = try fm.attributesOfItem(atPath: sourcePath)
+                let destinationAttributes = try fm.attributesOfItem(atPath: destinationPath)
+                guard sourceAttributes[.type] as? FileAttributeType == .typeDirectory else {
+                    failures.append(DirectoryTimestampRepairFailure(path: relativePath, reason: "bron is geen map"))
+                    continue
+                }
+                guard destinationAttributes[.type] as? FileAttributeType == .typeDirectory else {
+                    failures.append(DirectoryTimestampRepairFailure(path: relativePath, reason: "doel is geen map"))
+                    continue
+                }
+                guard let sourceDate = sourceAttributes[.modificationDate] as? Date else {
+                    failures.append(DirectoryTimestampRepairFailure(path: relativePath, reason: "bronwijzigingsdatum ontbreekt"))
+                    continue
+                }
+                if setModificationDate(path: destinationPath, date: sourceDate) {
+                    repaired += 1
+                } else {
+                    failures.append(DirectoryTimestampRepairFailure(path: relativePath, reason: "doelschijf hield de mapdatum niet vast"))
+                }
+            } catch {
+                failures.append(DirectoryTimestampRepairFailure(path: relativePath, reason: error.localizedDescription))
+            }
+        }
+        return DirectoryTimestampRepairResult(repaired: repaired, failures: failures, cancelled: false)
     }
 
     func syncRsyncTemporaryFileState(destinationPath: String, fileManager: FileManager) -> Bool? {
@@ -3642,6 +3766,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var pendingTimestampPaths: [String] = []
         var loggedSyncPaths: Set<String> = []
         var transferredPaths: [String] = []
+        var affectedDirectoryPathSet: Set<String> = []
         var pendingSyncEntry: (code: String, path: String)?
 
         func finalizePendingSyncEntry() {
@@ -3715,6 +3840,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             if let currentEntry = self.syncOutFormatEntry(from: trimmed) {
+                let directoryPaths = self.affectedDirectoryPaths(
+                    relativePath: currentEntry.path,
+                    includePathItself: self.syncItemizedEntryIsDirectory(currentEntry.code)
+                )
+                countQueue.sync { affectedDirectoryPathSet.formUnion(directoryPaths) }
                 if self.syncItemizedEntryTransfersContent(currentEntry.code) || self.syncItemizedEntryIsMetadataOnly(currentEntry.code) {
                     self.updateSyncProgress(profileId: profile.id, detail: currentEntry.path)
                 } else if currentEntry.code == "*deleting" {
@@ -3740,12 +3870,19 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 countQueue.sync { deleted += 1 }
                 if let path = self.syncProgressDetail(fromRsyncLine: trimmed) {
                     let cleanPath = path.replacingOccurrences(of: "*deleting", with: "").trimmingCharacters(in: .whitespaces)
+                    let directoryPaths = self.affectedDirectoryPaths(relativePath: cleanPath, includePathItself: false)
+                    countQueue.sync { affectedDirectoryPathSet.formUnion(directoryPaths) }
                     let shouldLog = countQueue.sync { loggedSyncPaths.insert("delete:\(cleanPath)").inserted }
                     if shouldLog {
                         self.recordTransferLog(status: "SYNC VERWIJDERD", relativePath: cleanPath, dstBase: dstPath, detail: "profiel: \(profile.name)")
                     }
                 }
             } else if let entry = self.syncItemizedEntry(from: trimmed) {
+                let directoryPaths = self.affectedDirectoryPaths(
+                    relativePath: entry.path,
+                    includePathItself: self.syncItemizedEntryIsDirectory(entry.code)
+                )
+                countQueue.sync { affectedDirectoryPathSet.formUnion(directoryPaths) }
                 if self.syncItemizedEntryTransfersContent(entry.code) {
                     let shouldLog = countQueue.sync { () -> Bool in
                         transferred += 1
@@ -3781,7 +3918,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else {
             countQueue.sync { pendingSyncEntry = nil }
         }
-        let snapshot = countQueue.sync { (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths) }
+        let snapshot = countQueue.sync {
+            (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths, Array(affectedDirectoryPathSet))
+        }
         var timestampRepair = SyncTimestampRepairResult(repaired: snapshot.4, failed: 0, cancelled: false)
         if !repairsTimestampsImmediately, !syncCancellationRequested(for: profile.id), !result.timedOut {
             timestampRepair = repairSyncModificationDates(
@@ -3814,15 +3953,56 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             recordTransferLog(status: "SYNC DATUMHERSTEL KLAAR", relativePath: profile.name, detail: detail)
         }
 
-        if syncCancellationRequested(for: profile.id) || timestampRepair.cancelled {
+        var directoryTimestampRepair = DirectoryTimestampRepairResult(repaired: 0, failures: [], cancelled: false)
+        if result.exitCode == 0,
+           !result.timedOut,
+           !syncCancellationRequested(for: profile.id),
+           !timestampRepair.cancelled,
+           !snapshot.6.isEmpty {
+            var lastDirectoryProgressUpdate = Date.distantPast
+            log("Sync mapdatumherstel gestart: \(profile.name) | \(snapshot.6.count) mappen")
+            directoryTimestampRepair = repairDirectoryModificationDates(
+                relativePaths: snapshot.6,
+                srcBase: srcPath,
+                dstBase: dstPath,
+                shouldCancel: { self.syncCancellationRequested(for: profile.id) }
+            ) { index, total, path in
+                let now = Date()
+                if index == 1 || index == total || now.timeIntervalSince(lastDirectoryProgressUpdate) >= 0.5 {
+                    self.updateSyncProgress(profileId: profile.id, detail: "Mapdatums herstellen: \(index)/\(total) | \(path)")
+                    lastDirectoryProgressUpdate = now
+                }
+            }
+            for failure in directoryTimestampRepair.failures {
+                log("Sync mapdatumherstel mislukt: \(profile.name) | \(failure.path) | \(failure.reason)")
+                recordTransferLog(
+                    status: "SYNC MAPDATUMHERSTEL MISLUKT",
+                    relativePath: failure.path,
+                    srcBase: srcPath,
+                    dstBase: dstPath,
+                    detail: failure.reason
+                )
+            }
+            let detail = "\(directoryTimestampRepair.repaired) mapdatums hersteld, \(directoryTimestampRepair.failures.count) mislukt"
+            log("Sync mapdatumherstel klaar: \(profile.name) | \(detail)")
+            recordTransferLog(status: "SYNC MAPDATUMHERSTEL KLAAR", relativePath: profile.name, detail: detail)
+        }
+
+        if syncCancellationRequested(for: profile.id) || timestampRepair.cancelled || directoryTimestampRepair.cancelled {
             finishCancelledSync(profile)
         } else if result.exitCode == 0 && result.timedOut == false {
             var status = snapshot.0 == 0 && snapshot.1 == 0 ? "OK: niets overgezet" : "OK: \(snapshot.0) bestanden overgezet"
             if snapshot.1 > 0 { status += ", \(snapshot.1) verwijderd" }
             if timestampRepair.repaired > 0 { status += " | \(timestampRepair.repaired) wijzigingsdatums hersteld" }
+            if directoryTimestampRepair.repaired > 0 { status += " | \(directoryTimestampRepair.repaired) mapdatums hersteld" }
             if snapshot.2 > 0 { status += " | \(snapshot.2) alleen metadata/attributen (inhoud overgeslagen)" }
-            if timestampRepair.failed > 0 {
-                status += " | Fout: \(timestampRepair.failed) wijzigingsdatums konden niet worden hersteld"
+            if timestampRepair.failed > 0 || !directoryTimestampRepair.failures.isEmpty {
+                if timestampRepair.failed > 0 {
+                    status += " | Fout: \(timestampRepair.failed) bestandsdatums konden niet worden hersteld"
+                }
+                if !directoryTimestampRepair.failures.isEmpty {
+                    status += " | Fout: \(directoryTimestampRepair.failures.count) mapdatums konden niet worden hersteld"
+                }
                 finishSyncProfile(profile, success: false, status: status)
             } else {
                 finishSyncProfile(profile, success: true, status: status)
@@ -4824,9 +5004,50 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
 
         let extraText = dstCount > srcCount ? ", extra op doel \(dstCount - srcCount) genegeerd" : ""
-        updatePostVerifyUI(detail: "Post-verify: bron \(srcCount), doel \(dstCount), mismatches \(mismatchesInitial.count)\(extraText)", estimatedPercent: 100)
 
         if mismatchesInitial.isEmpty {
+            let directoryPaths = sourceDirectoryRelativePaths(items: items, srcBase: srcBase)
+            if !directoryPaths.isEmpty {
+                setPhase("Post-verify (mapdatums herstellen)")
+                log("Post-verify mapdatumherstel gestart: \(directoryPaths.count) mappen")
+                var lastDirectoryProgressUpdate = Date.distantPast
+                let directoryRepair = repairDirectoryModificationDates(
+                    relativePaths: directoryPaths,
+                    srcBase: srcBase,
+                    dstBase: dstBase,
+                    shouldCancel: { self.isTransferCancelRequested() }
+                ) { index, total, path in
+                    let now = Date()
+                    if index == 1 || index == total || now.timeIntervalSince(lastDirectoryProgressUpdate) >= 0.5 {
+                        let estimatedPercent = 96 + Int((Double(index) / Double(max(total, 1))) * 4.0)
+                        updatePostVerifyUI(detail: "Mapdatums herstellen: \(index)/\(total) | \(path)", estimatedPercent: estimatedPercent)
+                        lastDirectoryProgressUpdate = now
+                    }
+                }
+                for failure in directoryRepair.failures {
+                    log("Post-verify mapdatumherstel mislukt: \(failure.path) | \(failure.reason)")
+                    recordTransferLog(
+                        status: "MAPDATUMHERSTEL MISLUKT",
+                        relativePath: failure.path,
+                        srcBase: srcBase,
+                        dstBase: dstBase,
+                        detail: failure.reason
+                    )
+                }
+                let detail = "\(directoryRepair.repaired) mapdatums hersteld, \(directoryRepair.failures.count) mislukt"
+                log("Post-verify mapdatumherstel klaar: \(detail)")
+                recordTransferLog(status: "MAPDATUMHERSTEL KLAAR", relativePath: items.joined(separator: ", "), detail: detail)
+                if directoryRepair.cancelled {
+                    return TransferSummary(name: items.joined(separator: ", "), status: .warning("Geannuleerd tijdens mapdatumherstel"))
+                }
+                if !directoryRepair.failures.isEmpty {
+                    return TransferSummary(
+                        name: items.joined(separator: ", "),
+                        status: .failed("\(directoryRepair.failures.count) mapdatums konden niet worden hersteld; bron is behouden")
+                    )
+                }
+            }
+            updatePostVerifyUI(detail: "Post-verify: bron \(srcCount), doel \(dstCount), mismatches 0\(extraText)", estimatedPercent: 100)
             if deleteSourceEnabled == false {
                 setPhase("Bron behouden")
                 log("Opschonen overgeslagen (bron behouden): \(items.joined(separator: ", "))")
@@ -4848,6 +5069,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             return TransferSummary(name: items.joined(separator: ", "), status: .failed("Bron niet volledig verwijderd"))
         }
 
+        updatePostVerifyUI(detail: "Post-verify: bron \(srcCount), doel \(dstCount), mismatches \(mismatchesInitial.count)\(extraText)", estimatedPercent: 100)
         let details = buildMismatchDetails(mismatchesInitial, srcBase: srcBase, dstBase: dstBase)
         let headerText = details.isEmpty
             ? "Geen mismatch-bestanden gevonden, maar telling/timestamps wijken af."

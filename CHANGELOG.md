@@ -2,6 +2,20 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.12] - 2026-08-10
+
+### Opgelost
+
+- MoveFolders behoudt nu naast bestandsdatums ook de wijzigingsdatums van overgezette mappen, zowel bij `Move folders` als bij `Sync folders`.
+- Mapdatums worden na een volledig geslaagde overdracht van de diepste map naar de bovenliggende mappen hersteld. Hierdoor kan het schrijven van onderliggende bestanden de zojuist herstelde datum niet opnieuw veranderen.
+- Een sync herstelt alleen de datums van mappen die door toegevoegde, gewijzigde of verwijderde inhoud geraakt zijn, inclusief de syncroot.
+- Een gewone verplaatsopdracht herstelt alle geselecteerde bronmappen vóór de optionele bronverwijdering. Als een mapdatum niet veilig kan worden hersteld, blijft de bron behouden en wordt de fout expliciet gemeld.
+- De voortgang en het overdrachtslog tonen de aparte fase voor mapdatumherstel en eventuele fouten per map.
+
+### Getest
+
+- Op de gebruikte SMB-doelschijf zijn de wijzigingsdatums van meerdere geneste mappen en de synchronisatieroot na een proefkopie succesvol diep-naar-boven hersteld en opnieuw gecontroleerd.
+
 ## [0.9.11] - 2026-08-10
 
 ### Toegevoegd
