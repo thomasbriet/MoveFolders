@@ -2898,14 +2898,28 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
     func nextSyncDate(for profile: SyncProfile) -> Date? {
         guard let lastRunAt = profile.lastRunAt else { return nil }
-        let retryMinutes: Int
-        if profile.consecutiveFailures <= 0 {
-            retryMinutes = max(1, profile.intervalMinutes)
-        } else {
-            let backoff = [1, 5, 15, 30, 60]
-            retryMinutes = backoff[min(profile.consecutiveFailures - 1, backoff.count - 1)]
-        }
+        let retryMinutes = syncRetryMinutes(
+            consecutiveFailures: profile.consecutiveFailures,
+            normalIntervalMinutes: profile.intervalMinutes
+        )
         return lastRunAt.addingTimeInterval(TimeInterval(retryMinutes * 60))
+    }
+
+    func syncRetryMinutes(consecutiveFailures: Int, normalIntervalMinutes: Int) -> Int {
+        switch consecutiveFailures {
+        case ...0:
+            return max(1, normalIntervalMinutes)
+        case 1...5:
+            return 1
+        case 6...10:
+            return 5
+        case 11...14:
+            return 15
+        case 15...16:
+            return 30
+        default:
+            return 60
+        }
     }
 
     func syncProfileIsDue(_ profile: SyncProfile, now: Date = Date()) -> Bool {

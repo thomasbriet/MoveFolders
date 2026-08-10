@@ -2,6 +2,14 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.10] - 2026-08-10
+
+### Gewijzigd
+
+- Het automatische retrieschema na syncfouten is verfijnd: pogingen 1 t/m 5 volgen na 1 minuut, 6 t/m 10 na 5 minuten, 11 t/m 14 na 15 minuten, 15 en 16 na 30 minuten en alle volgende pogingen na 60 minuten.
+- Een tijdelijke netwerk- of rsyncfout leidt daardoor niet meer al na enkele mislukte runs tot een wachttijd van een uur.
+- Na een geslaagde sync wordt de foutenteller zoals voorheen teruggezet en geldt weer het normale profielinterval.
+
 ## [0.9.9] - 2026-08-07
 
 ### Opgelost
