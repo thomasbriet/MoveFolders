@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.11] - 2026-08-10
+
+### Toegevoegd
+
+- MoveFolders controleert twee seconden na iedere start automatisch en op de achtergrond de nieuwste GitHub-release.
+- Alleen wanneer een nieuwere versie beschikbaar is verschijnt de bestaande updatekeuze met `Download en open installer`, `Open release` en `Later`.
+
+### Gewijzigd
+
+- Een mislukte automatische updatecontrole onderbreekt het openen van de app niet en wordt alleen in Debug gelogd. De handmatige knop `Updates` blijft fouten en de melding dat de nieuwste versie al wordt gebruikt wel tonen.
+- Gelijktijdige automatische en handmatige updatecontroles worden voorkomen en GitHub-responses worden ook op HTTP-status gecontroleerd.
+
 ## [0.9.10] - 2026-08-10
 
 ### Gewijzigd

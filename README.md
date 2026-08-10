@@ -11,18 +11,18 @@ Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.9.10
+./scripts/build_release.sh 0.9.11
 ```
 
 Dit maakt lokaal:
 
 - `MoveFolders.app`
-- `MoveFolders_v0.9.10_share.zip`
-- `MoveFolders_v0.9.10_installer.pkg`
+- `MoveFolders_v0.9.11_share.zip`
+- `MoveFolders_v0.9.11_installer.pkg`
 
 ## Updates
 
-De app heeft een knop `Updates` die de nieuwste GitHub Release kan controleren en de `.pkg` installer kan openen.
+De app controleert bij iedere start automatisch op een nieuwere GitHub Release en toont alleen een melding wanneer een update beschikbaar is. De knop `Updates` kan dezelfde controle handmatig uitvoeren en de `.pkg` installer openen.
 
 Voor gebruik moet in `MoveFolders_v0.3.swift` deze constante worden ingesteld:
 

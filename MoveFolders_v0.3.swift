@@ -500,6 +500,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var debugButton: NSButton!
     var transferLogButton: NSButton!
     var updatesButton: NSButton!
+    var updateCheckInProgress = false
     var resumeButton: NSButton!
     var saveFavoriteButton: NSButton!
     var syncProfilePopup: NSPopUpButton!
@@ -1051,6 +1052,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             self.schedulePendingDeleteCleanup(basePath: self.srcField.stringValue)
         }
         startSyncScheduler()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            self.performUpdateCheck(isAutomatic: true)
+        }
 
         app.run()
     }
@@ -5894,31 +5898,72 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     @objc func checkForUpdates() {
+        performUpdateCheck(isAutomatic: false)
+    }
+
+    func finishUpdateCheck(errorMessage: String?, isAutomatic: Bool) {
+        updateCheckInProgress = false
+        updatesButton?.isEnabled = true
+        guard let errorMessage else { return }
+        log("Updatecontrole mislukt: \(errorMessage)")
+        if !isAutomatic {
+            alert("Updatecontrole mislukt:\n\(errorMessage)")
+        }
+    }
+
+    func performUpdateCheck(isAutomatic: Bool) {
+        guard !updateCheckInProgress else {
+            if !isAutomatic { alert("Updatecontrole is al bezig.") }
+            return
+        }
         guard updateGitHubOwner != "TODO_GITHUB_OWNER", updateGitHubOwner.isEmpty == false else {
-            alert("Updatecontrole is nog niet gekoppeld aan GitHub.\nStel updateGitHubOwner/updateGitHubRepo in en publiceer releases met een .pkg installer.")
+            let message = "Updatecontrole is nog niet gekoppeld aan GitHub. Stel updateGitHubOwner/updateGitHubRepo in en publiceer releases met een .pkg installer."
+            log(message)
+            if !isAutomatic { alert(message) }
             return
         }
         guard let url = URL(string: "https://api.github.com/repos/\(updateGitHubOwner)/\(updateGitHubRepo)/releases/latest") else {
-            alert("Update-URL is ongeldig.")
+            let message = "Update-URL is ongeldig."
+            log(message)
+            if !isAutomatic { alert(message) }
             return
         }
 
-        log("Updatecontrole start: \(url.absoluteString)")
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
+        updateCheckInProgress = true
+        updatesButton?.isEnabled = false
+        log("\(isAutomatic ? "Automatische updatecontrole" : "Updatecontrole") start: \(url.absoluteString)")
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+        let currentVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
+        request.setValue("MoveFolders/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                DispatchQueue.main.async { self.alert("Updatecontrole mislukt:\n\(error.localizedDescription)") }
+                DispatchQueue.main.async {
+                    self.finishUpdateCheck(errorMessage: error.localizedDescription, isAutomatic: isAutomatic)
+                }
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                DispatchQueue.main.async {
+                    self.finishUpdateCheck(errorMessage: "GitHub gaf HTTP \(http.statusCode).", isAutomatic: isAutomatic)
+                }
                 return
             }
             guard let data = data else {
-                DispatchQueue.main.async { self.alert("Updatecontrole mislukt: geen response.") }
+                DispatchQueue.main.async {
+                    self.finishUpdateCheck(errorMessage: "Geen response ontvangen.", isAutomatic: isAutomatic)
+                }
                 return
             }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                DispatchQueue.main.async { self.alert("Updatecontrole mislukt: response kon niet gelezen worden.") }
+                DispatchQueue.main.async {
+                    self.finishUpdateCheck(errorMessage: "De response kon niet worden gelezen.", isAutomatic: isAutomatic)
+                }
                 return
             }
             if let message = json["message"] as? String, json["tag_name"] == nil {
-                DispatchQueue.main.async { self.alert("Updatecontrole mislukt:\n\(message)") }
+                DispatchQueue.main.async {
+                    self.finishUpdateCheck(errorMessage: message, isAutomatic: isAutomatic)
+                }
                 return
             }
 
@@ -5932,19 +5977,30 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }.first
 
             DispatchQueue.main.async {
-                self.handleUpdateResult(latestVersion: latestVersion, releaseURLString: releaseURLString, packageURLString: pkgURLString)
+                self.finishUpdateCheck(errorMessage: nil, isAutomatic: isAutomatic)
+                self.handleUpdateResult(
+                    latestVersion: latestVersion,
+                    releaseURLString: releaseURLString,
+                    packageURLString: pkgURLString,
+                    showNoUpdateAlert: !isAutomatic
+                )
             }
         }
         task.resume()
     }
 
-    func handleUpdateResult(latestVersion: String, releaseURLString: String, packageURLString: String?) {
+    func handleUpdateResult(latestVersion: String, releaseURLString: String, packageURLString: String?, showNoUpdateAlert: Bool) {
         let currentVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
         guard compareVersions(latestVersion, currentVersion) == .orderedDescending else {
-            alert("Je gebruikt de nieuwste versie.\nHuidig: \(currentVersion)\nLaatste: \(latestVersion.isEmpty ? "-" : latestVersion)")
+            log("Updatecontrole klaar: huidige versie \(currentVersion), laatste versie \(latestVersion.isEmpty ? "-" : latestVersion)")
+            if showNoUpdateAlert {
+                alert("Je gebruikt de nieuwste versie.\nHuidig: \(currentVersion)\nLaatste: \(latestVersion.isEmpty ? "-" : latestVersion)")
+            }
             return
         }
 
+        log("Update beschikbaar: huidig \(currentVersion), nieuw \(latestVersion)")
+        NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Update beschikbaar"
         alert.informativeText = "Huidig: \(currentVersion)\nNieuw: \(latestVersion)\n\nMoveFolders downloadt de installer en sluit daarna, zodat de update de bestaande app kan vervangen."
