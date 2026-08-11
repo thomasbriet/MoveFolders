@@ -2,6 +2,16 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.14] - 2026-08-11
+
+### Opgelost
+
+- Het voortgangsscherm in `Sync folders` volgt nu automatisch een actieve sync wanneer het geselecteerde profiel zelf niet draait. Daardoor blijft het hoofdscherm niet meer ten onrechte `wacht` tonen terwijl een ander profiel bestanden synchroniseert.
+- De profielvelden en dropdown blijven op het handmatig geselecteerde profiel staan, zodat een automatisch gestarte sync geen invoer of profielkeuze overschrijft.
+- De onderste statusregel vermeldt actieve profielen apart van het geselecteerde profiel en wordt bij starten, voortgang, wachten en afronden direct bijgewerkt.
+- `Stop sync` stopt het profiel waarvan de actieve voortgang wordt getoond wanneer het geselecteerde profiel niet draait.
+- De verouderde tekst `Netwerkschijven elke 5 minuten verbinden` is vervangen door `Netwerkschijven automatisch verbinden`, passend bij het oplopende retrieschema.
+
 ## [0.9.13] - 2026-08-11
 
 ### Opgelost

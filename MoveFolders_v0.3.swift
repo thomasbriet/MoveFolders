@@ -1012,7 +1012,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
         syncXattrsCheckbox.autoresizingMask = []
         syncContent.addSubview(syncXattrsCheckbox)
-        syncAutoReconnectCheckbox = NSButton(checkboxWithTitle: "Netwerkschijven elke 5 minuten verbinden", target: nil, action: nil)
+        syncAutoReconnectCheckbox = NSButton(checkboxWithTitle: "Netwerkschijven automatisch verbinden", target: nil, action: nil)
         syncAutoReconnectCheckbox.state = .on
         syncAutoReconnectCheckbox.autoresizingMask = []
         syncContent.addSubview(syncAutoReconnectCheckbox)
@@ -1046,7 +1046,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             applySyncProfileToFields(profile)
         }
         refreshSyncProfileMenu()
-        renderSyncProgress(for: selectedSyncProfile())
+        refreshVisibleSyncState()
         updateResumeButton()
         layoutMainWindow()
         setupStatusItem()
@@ -1463,7 +1463,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             detail: paused ? "Lopende syncs worden nog afgerond." : "De scheduler is weer actief."
         )
         updateStatusItemAppearance()
-        updateSyncStatusLabel(profile: selectedSyncProfile())
+        refreshVisibleSyncState()
         if !paused {
             DispatchQueue.global(qos: .utility).async {
                 self.tickSyncProfiles()
@@ -1749,8 +1749,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         selectedSyncProfileId = id
         applySyncProfileToFields(profile)
         refreshSyncProfileMenu()
-        updateSyncStatusLabel(profile: profile)
-        renderSyncProgress(for: profile)
+        refreshVisibleSyncState()
         log("Sync-profiel geselecteerd: \(profile.name)")
     }
 
@@ -1765,8 +1764,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         syncXattrsCheckbox.state = copyXattrsEnabled ? .on : .off
         syncAutoReconnectCheckbox.state = .on
         refreshSyncProfileMenu()
-        updateSyncStatusLabel(profile: nil)
-        renderSyncProgress(for: nil)
+        refreshVisibleSyncState()
         window.makeFirstResponder(syncNameField)
         syncNameField.selectText(nil)
         log("Nieuw sync-profiel gestart")
@@ -1813,7 +1811,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         syncProfiles.insert(profile, at: 0)
         selectedSyncProfileId = profile.id
         saveSyncProfiles()
-        updateSyncStatusLabel(profile: profile)
+        refreshVisibleSyncState()
         log("Sync-profiel bewaard: \(profile.name)")
     }
 
@@ -1826,7 +1824,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         syncProfiles[idx].enabled.toggle()
         syncProfiles[idx].updatedAt = Date()
         saveSyncProfiles()
-        updateSyncStatusLabel(profile: syncProfiles[idx])
+        refreshVisibleSyncState()
         syncEnabledCheckbox.state = syncProfiles[idx].enabled ? .on : .off
         log("Sync-profiel \(syncProfiles[idx].enabled ? "ingeschakeld" : "uitgeschakeld"): \(syncProfiles[idx].name)")
     }
@@ -1840,7 +1838,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     @objc func stopSelectedSyncProfile() {
-        guard let profile = selectedSyncProfile() else { return }
+        let runningIds = syncStateQueue.sync { syncRunningProfileIds }
+        guard let profile = syncProgressProfile(runningIds: runningIds), runningIds.contains(profile.id) else {
+            refreshSyncProfileMenu()
+            return
+        }
         let state = syncStateQueue.sync { () -> (running: Bool, process: Process?) in
             guard syncRunningProfileIds.contains(profile.id) else { return (false, nil) }
             syncCancellationRequestedProfileIds.insert(profile.id)
@@ -2712,6 +2714,26 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return syncProfiles.first(where: { $0.id == id })
     }
 
+    func syncProgressProfile(runningIds providedRunningIds: Set<String>? = nil) -> SyncProfile? {
+        let runningIds = providedRunningIds ?? syncStateQueue.sync { syncRunningProfileIds }
+        if let selected = selectedSyncProfile(), runningIds.contains(selected.id) {
+            return selected
+        }
+        if let running = syncProfiles.first(where: { runningIds.contains($0.id) }) {
+            return running
+        }
+        return selectedSyncProfile()
+    }
+
+    func refreshVisibleSyncState() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.refreshVisibleSyncState() }
+            return
+        }
+        updateSyncStatusLabel(profile: selectedSyncProfile())
+        renderSyncProgress(for: syncProgressProfile())
+    }
+
     func applySyncProfileToFields(_ profile: SyncProfile) {
         guard syncNameField != nil else { return }
         syncNameField.stringValue = profile.name
@@ -2858,8 +2880,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             if self.selectedSyncProfileId == resolved.id {
                 if sourceFieldStillMatches { self.syncSrcField.stringValue = resolved.srcPath }
                 if destinationFieldStillMatches { self.syncDstField.stringValue = resolved.dstPath }
-                self.updateSyncStatusLabel(profile: resolved)
             }
+            self.refreshVisibleSyncState()
             if resolved.srcPath != previous.srcPath || resolved.dstPath != previous.dstPath {
                 self.log("Sync-profiel gebruikt opnieuw gekoppelde schijf: \(resolved.name) | \(resolved.srcPath) -> \(resolved.dstPath)")
             }
@@ -2898,7 +2920,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
         syncProfilePopup.isEnabled = true
         runSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
-        stopSyncProfileButton?.isEnabled = selectedSyncProfileId.map { runningIds.contains($0) } ?? false
+        let stopProfile = syncProgressProfile(runningIds: runningIds).flatMap { runningIds.contains($0.id) ? $0 : nil }
+        stopSyncProfileButton?.isEnabled = stopProfile != nil
+        stopSyncProfileButton?.toolTip = stopProfile.map { "Stop actieve sync: \($0.name)" }
         toggleSyncProfileButton?.isEnabled = selectedSyncProfileId != nil
         saveSyncProfileButton?.title = selectedSyncProfileId == nil ? "Maak sync" : "Bewaar sync"
         syncProfilePopup.selectItem(at: 0)
@@ -2906,8 +2930,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
     func updateSyncStatusLabel(profile: SyncProfile?) {
         guard syncStatusLabel != nil else { return }
+        let runningIds = syncStateQueue.sync { syncRunningProfileIds }
+        let runningNames = syncProfiles.filter { runningIds.contains($0.id) }.map(\.name)
         guard let profile = profile else {
-            syncStatusLabel.stringValue = "Sync: geen profiel"
+            syncStatusLabel.stringValue = runningNames.isEmpty
+                ? "Sync: geen profiel"
+                : "Actief: \(runningNames.joined(separator: ", ")) | geen profiel geselecteerd"
             return
         }
         let runText: String
@@ -2917,7 +2945,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             runText = "nog niet"
         }
         let nextText: String
-        if profile.enabled && automaticSyncsArePaused() {
+        if runningIds.contains(profile.id) {
+            nextText = "na afronding"
+        } else if profile.enabled && automaticSyncsArePaused() {
             nextText = "gepauzeerd"
         } else if profile.enabled, let next = nextSyncDate(for: profile) {
             nextText = fileInfoFormatterQueue.sync { fileInfoFormatter.string(from: next) }
@@ -2926,7 +2956,15 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else {
             nextText = "uit"
         }
-        syncStatusLabel.stringValue = "Sync: \(profile.name) | \(profile.enabled ? "aan" : "uit") | laatste: \(runText) | volgende: \(nextText) | \(profile.lastStatus)"
+        let profileStatus = runningIds.contains(profile.id) ? "Bezig..." : profile.lastStatus
+        let selectedPrefix: String
+        if runningNames.isEmpty || (runningNames.count == 1 && runningIds.contains(profile.id)) {
+            selectedPrefix = "Sync: \(profile.name)"
+        } else {
+            selectedPrefix = "Actief: \(runningNames.joined(separator: ", ")) | Geselecteerd: \(profile.name)"
+        }
+        let activityText = runningIds.contains(profile.id) ? "bezig" : (profile.enabled ? "aan" : "uit")
+        syncStatusLabel.stringValue = "\(selectedPrefix) | \(activityText) | laatste: \(runText) | volgende: \(nextText) | \(profileStatus)"
     }
 
     func nextSyncDate(for profile: SyncProfile) -> Date? {
@@ -3042,11 +3080,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 isRunning: false,
                 succeeded: nil
             )
-            if self.selectedSyncProfileId == profile.id {
-                let current = self.syncProfiles.first(where: { $0.id == profile.id }) ?? profile
-                self.updateSyncStatusLabel(profile: current)
-                self.renderSyncProgress(for: current)
-            }
+            self.refreshVisibleSyncState()
         }
     }
 
@@ -3292,6 +3326,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         if started {
             DispatchQueue.main.async {
                 self.refreshSyncProfileMenu()
+                self.refreshVisibleSyncState()
                 self.updateStatusItemAppearance()
             }
         }
@@ -3304,6 +3339,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
         DispatchQueue.main.async {
             self.refreshSyncProfileMenu()
+            self.refreshVisibleSyncState()
             self.updateStatusItemAppearance()
         }
     }
@@ -3312,11 +3348,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         DispatchQueue.main.async {
             guard let idx = self.syncProfiles.firstIndex(where: { $0.id == id }) else { return }
             mutate(&self.syncProfiles[idx])
-            let updated = self.syncProfiles[idx]
             self.saveSyncProfiles()
-            if self.selectedSyncProfileId == id {
-                self.updateSyncStatusLabel(profile: updated)
-            }
+            self.refreshVisibleSyncState()
         }
     }
 
@@ -3331,9 +3364,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 isRunning: true,
                 succeeded: nil
             )
-            if self.selectedSyncProfileId == profile.id {
-                self.renderSyncProgress(for: profile)
-            }
+            self.refreshVisibleSyncState()
         }
     }
 
@@ -3349,8 +3380,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 state.detail = detail
             }
             self.syncProgressStates[profileId] = state
-            if self.selectedSyncProfileId == profileId {
-                self.renderSyncProgress(for: self.selectedSyncProfile())
+            let displayedProfile = self.syncProgressProfile()
+            if displayedProfile?.id == profileId {
+                self.renderSyncProgress(for: displayedProfile)
             }
         }
     }
@@ -3372,10 +3404,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             state.succeeded = success
             if success { state.eta = "0:00:00" }
             self.syncProgressStates[profileId] = state
-            if self.selectedSyncProfileId == profileId {
-                let profile = self.syncProfiles.first(where: { $0.id == profileId })
-                self.renderSyncProgress(for: profile)
-            }
+            self.refreshVisibleSyncState()
         }
     }
 
