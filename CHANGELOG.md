@@ -2,6 +2,16 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.13] - 2026-08-11
+
+### Opgelost
+
+- Opgeslagen foutentellers van syncprofielen worden bij iedere herstart van MoveFolders gereset. Een nieuwe sessie begint daardoor opnieuw bij de eerste retryfase en neemt geen oude foutreeks uit een vorige sessie over.
+- Een volledig geslaagde sync blijft de foutenteller direct op nul zetten.
+- Het stil opnieuw koppelen van ontbrekende netwerkschijven gebruikt nu hetzelfde oplopende schema als syncfouten: fouten 1 t/m 5 na 1 minuut, 6 t/m 10 na 5 minuten, 11 t/m 14 na 15 minuten, 15 en 16 na 30 minuten en daarna na 60 minuten.
+- Netwerkschijfkoppelingen hebben een eigen foutenteller per share. Deze teller wordt bij een geslaagde koppeling en automatisch bij iedere appstart gereset.
+- De syncstatus en het log tonen het nummer van de mislukte koppelpoging en de actuele wachttijd.
+
 ## [0.9.12] - 2026-08-10
 
 ### Opgelost

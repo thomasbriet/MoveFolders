@@ -586,6 +586,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var syncActiveProcesses: [String: Process] = [:]
     var syncCancellationRequestedProfileIds: Set<String> = []
     var syncReconnectLastAttempt: [String: Date] = [:]
+    var syncReconnectFailureCounts: [String: Int] = [:]
+    var syncReconnectInProgressKeys: Set<String> = []
     var automaticSyncsPaused = false
     var startHiddenInMenuBar = false
     var mainFolderListsLoaded = false
@@ -606,7 +608,6 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     let favoritePresetLimit = 20
     let resumeStateQueue = DispatchQueue(label: "MoveFolders.resumeState")
     let syncStateQueue = DispatchQueue(label: "MoveFolders.syncState")
-    let syncReconnectInterval: TimeInterval = 5 * 60
     let pendingCleanupStateQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.state")
     var pendingCleanupPaths: Set<String> = []
     let transferControlQueue = DispatchQueue(label: "MoveFolders.transferControl")
@@ -916,6 +917,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         favoritePresets = loadFavoritePresets()
         lastResumeJob = loadResumeJob()
         syncProfiles = loadSyncProfiles()
+        let resetSyncFailureProfileCount = resetSyncFailureCountersForNewSession()
         recentSourcePopup = makePopup(380, 575, 180, #selector(selectRecentSource))
         recentDestinationPopup = makePopup(380, 545, 180, #selector(selectRecentDestination))
         favoritePopup = makePopup(20, 575, 170, #selector(selectFavoritePreset))
@@ -1050,6 +1052,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         setupStatusItem()
 
         setupDebugWindow()
+        if resetSyncFailureProfileCount > 0 {
+            log("Sync-foutentellers bij appstart gereset: \(resetSyncFailureProfileCount) profiel(en)")
+        }
         if startHiddenInMenuBar {
             window.orderOut(nil)
             log("App gestart in menubalkmodus")
@@ -2676,6 +2681,19 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return decoded
     }
 
+    func resetSyncFailureCountersForNewSession() -> Int {
+        var resetCount = 0
+        for index in syncProfiles.indices where syncProfiles[index].consecutiveFailures != 0 {
+            syncProfiles[index].consecutiveFailures = 0
+            resetCount += 1
+        }
+        guard resetCount > 0,
+              let data = try? JSONEncoder().encode(syncProfiles) else { return resetCount }
+        recentSourceDefaults.set(data, forKey: syncProfilesDefaultsKey)
+        recentSourceDefaults.synchronize()
+        return resetCount
+    }
+
     func saveSyncProfiles() {
         syncProfiles.sort {
             if $0.enabled != $1.enabled { return $0.enabled && !$1.enabled }
@@ -2952,6 +2970,37 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         directoryExists(atPath: profile.srcPath) && directoryExists(atPath: profile.dstPath)
     }
 
+    func syncReconnectKey(for urlString: String?) -> String? {
+        guard let urlString,
+              let rawURL = URL(string: urlString),
+              let url = sanitizedRemountURL(rawURL) else { return nil }
+        return canonicalRemountKey(url)
+    }
+
+    func syncReconnectRetryMinutes(failureCount: Int) -> Int {
+        syncRetryMinutes(consecutiveFailures: max(1, failureCount), normalIntervalMinutes: 1)
+    }
+
+    func syncReconnectRetryMinutes(for profile: SyncProfile) -> Int {
+        var keys: [String] = []
+        if !directoryExists(atPath: profile.srcPath),
+           let key = syncReconnectKey(for: profile.srcRemountURL) {
+            keys.append(key)
+        }
+        if !directoryExists(atPath: profile.dstPath),
+           let key = syncReconnectKey(for: profile.dstRemountURL) {
+            keys.append(key)
+        }
+        guard !keys.isEmpty else { return 1 }
+        return syncStateQueue.sync {
+            keys.map { syncReconnectRetryMinutes(failureCount: syncReconnectFailureCounts[$0] ?? 0) }.min() ?? 1
+        }
+    }
+
+    func retryIntervalText(minutes: Int) -> String {
+        minutes == 1 ? "1 minuut" : "\(minutes) minuten"
+    }
+
     func syncWaitingStatus(for profile: SyncProfile) -> String {
         var missing: [String] = []
         var reconnectDataMissing = false
@@ -2973,7 +3022,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         if reconnectDataMissing {
             return "Wacht op \(names); koppel de share één keer handmatig en bewaar dit profiel opnieuw."
         }
-        return "Wacht op \(names); nieuwe koppelpoging elke 5 minuten."
+        let retryMinutes = syncReconnectRetryMinutes(for: profile)
+        return "Wacht op \(names); nieuwe koppelpoging over maximaal \(retryIntervalText(minutes: retryMinutes))."
     }
 
     func showSyncWaiting(profile: SyncProfile, status: String) {
@@ -3028,17 +3078,23 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (status == 0, status, mountPoints)
     }
 
-    func requestSilentNetworkMount(_ url: URL, profile: SyncProfile, label: String) {
+    func requestSilentNetworkMount(_ url: URL, reconnectKey: String, profile: SyncProfile, label: String) {
         DispatchQueue.global(qos: .utility).async {
             let result = self.mountNetworkVolumeSilently(url)
             let mounted = result.success || self.mountedVolumeURL(forRemountURLString: url.absoluteString) != nil
             if mounted {
+                let previousFailures = self.syncStateQueue.sync { () -> Int in
+                    self.syncReconnectInProgressKeys.remove(reconnectKey)
+                    self.syncReconnectLastAttempt[reconnectKey] = Date()
+                    return self.syncReconnectFailureCounts.removeValue(forKey: reconnectKey) ?? 0
+                }
                 let pathDetail = result.mountPaths.isEmpty ? "gekoppeld" : "gekoppeld op \(result.mountPaths.joined(separator: ", "))"
-                self.log("Netwerkschijf verbinden: \(profile.name) | \(label) | stil \(pathDetail)")
+                let resetDetail = previousFailures > 0 ? " | foutenteller gereset na \(previousFailures) mislukte poging(en)" : ""
+                self.log("Netwerkschijf verbinden: \(profile.name) | \(label) | stil \(pathDetail)\(resetDetail)")
                 self.recordTransferLog(
                     status: "NETWERKSCHIJF GEKOPPELD",
                     relativePath: profile.name,
-                    detail: "\(label): stil \(pathDetail)"
+                    detail: "\(label): stil \(pathDetail)\(resetDetail)"
                 )
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
                     self.tickSyncProfiles()
@@ -3047,7 +3103,15 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }
 
             let error = self.networkMountErrorDescription(result.status)
-            let status = "\(label) kon niet stil worden verbonden: \(error). Nieuwe poging over maximaal 5 minuten."
+            let failureCount = self.syncStateQueue.sync { () -> Int in
+                self.syncReconnectInProgressKeys.remove(reconnectKey)
+                self.syncReconnectLastAttempt[reconnectKey] = Date()
+                let count = (self.syncReconnectFailureCounts[reconnectKey] ?? 0) + 1
+                self.syncReconnectFailureCounts[reconnectKey] = count
+                return count
+            }
+            let retryMinutes = self.syncReconnectRetryMinutes(failureCount: failureCount)
+            let status = "\(label) kon niet stil worden verbonden: \(error). Koppelpoging \(failureCount) mislukt; nieuwe poging over \(self.retryIntervalText(minutes: retryMinutes))."
             self.log("Netwerkschijf verbinden mislukt: \(profile.name) | \(status)")
             self.recordTransferLog(
                 status: "NETWERKSCHIJF KOPPELEN MISLUKT",
@@ -3075,18 +3139,28 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             let key = canonicalRemountKey(url)
             guard seen.insert(key).inserted else { continue }
             let now = Date()
-            let shouldAttempt = syncStateQueue.sync { () -> Bool in
+            let attemptState = syncStateQueue.sync { () -> (shouldStart: Bool, alreadyRunning: Bool) in
+                if syncReconnectInProgressKeys.contains(key) {
+                    return (false, true)
+                }
+                let failureCount = syncReconnectFailureCounts[key] ?? 0
+                let retryInterval = TimeInterval(syncReconnectRetryMinutes(failureCount: failureCount) * 60)
                 if !force,
                    let lastAttempt = syncReconnectLastAttempt[key],
-                   now.timeIntervalSince(lastAttempt) < syncReconnectInterval {
-                    return false
+                   now.timeIntervalSince(lastAttempt) < retryInterval {
+                    return (false, false)
                 }
                 syncReconnectLastAttempt[key] = now
-                return true
+                syncReconnectInProgressKeys.insert(key)
+                return (true, false)
             }
-            guard shouldAttempt else { continue }
+            if attemptState.alreadyRunning {
+                requested = true
+                continue
+            }
+            guard attemptState.shouldStart else { continue }
 
-            requestSilentNetworkMount(url, profile: profile, label: candidate.label)
+            requestSilentNetworkMount(url, reconnectKey: key, profile: profile, label: candidate.label)
             requested = true
             log("Netwerkschijf verbinden: \(profile.name) | \(candidate.label) | stille koppelpoging gestart")
         }
