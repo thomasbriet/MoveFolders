@@ -2,6 +2,24 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.16] - 2026-08-12
+
+### Opgelost
+
+- Een racecondition tussen de live stdout/stderr-lezer en de afsluitcallback van `Process` is opgelost. Beide konden precies bij het stoppen van rsync tegelijk dezelfde `Data`-buffer lezen en wijzigen, wat een `EXC_BREAKPOINT` in `Data._Representation.subscript.getter` veroorzaakte.
+- De streamingbuffer is ondergebracht in één vergrendelde toestand. Live lezen, de resterende uitvoer ophalen, records splitsen en een snapshot maken kunnen daardoor niet meer gelijktijdig dezelfde gegevens benaderen.
+- Dezelfde beveiliging geldt nu ook voor gewone Move-folders-overdrachten, waar de lees- en afsluitcallback een vergelijkbaar risico hadden.
+- Regels die door een leesgrens midden in een UTF-8-teken of bestandsnaam werden gesplitst, worden eerst als bytes samengevoegd en pas daarna verwerkt.
+
+### Geoptimaliseerd
+
+- MoveFolders bewaart per lopend commando maximaal de laatste 4 MB uitvoer in het geheugen. Langdurige syncs kunnen daardoor niet meer honderden MB aan reeds verwerkt rsync-log vasthouden.
+- Het debugvenster verwerkt regels voortaan gebundeld per kwart seconde en houdt een begrensde recente geschiedenis bij. Een verborgen debugvenster wordt niet meer voor iedere rsync-regel opnieuw opgemaakt en naar beneden gescrold.
+
+### Getest
+
+- De nieuwe streamingafhandeling heeft een ThreadSanitizer-stresstest met 3.600.000 records doorstaan zonder datarace of ontbrekende records. Daarbij bleef een uitvoerstroom van 6 MB correct begrensd op exact 4 MB.
+
 ## [0.9.15] - 2026-08-12
 
 ### Opgelost

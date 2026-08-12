@@ -3,6 +3,91 @@ import Darwin
 import NetFS
 import ServiceManagement
 
+final class StreamingProcessOutput: @unchecked Sendable {
+    struct Snapshot {
+        let data: Data
+        let wasTruncated: Bool
+    }
+
+    private let lock = NSLock()
+    private let captureLimit: Int
+    private var capturedData = Data()
+    private var recordBuffer = Data()
+    private var wasTruncated = false
+    private var finished = false
+
+    init(captureLimit: Int) {
+        self.captureLimit = max(1, captureLimit)
+    }
+
+    @discardableResult
+    func readAvailable(from handle: FileHandle, onData: (() -> Void)? = nil, onRecord: (String) -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return false }
+        let data = handle.availableData
+        guard !data.isEmpty else { return false }
+        onData?()
+        consumeLocked(data, onRecord: onRecord)
+        return true
+    }
+
+    func finishReading(from handle: FileHandle, onRecord: (String) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        finished = true
+        consumeLocked(handle.readDataToEndOfFile(), onRecord: onRecord)
+        if !recordBuffer.isEmpty {
+            onRecord(String(decoding: recordBuffer, as: UTF8.self))
+            recordBuffer.removeAll(keepingCapacity: false)
+        }
+        trimCapturedDataLocked()
+    }
+
+    func stopWithoutDraining() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(data: capturedData, wasTruncated: wasTruncated)
+    }
+
+    private func consumeLocked(_ data: Data, onRecord: (String) -> Void) {
+        guard !data.isEmpty else { return }
+        capturedData.append(data)
+        let trimThreshold = captureLimit * 2
+        if capturedData.count > trimThreshold {
+            let removeCount = capturedData.count - captureLimit
+            capturedData.removeSubrange(capturedData.startIndex..<capturedData.index(capturedData.startIndex, offsetBy: removeCount))
+            wasTruncated = true
+        }
+
+        recordBuffer.append(data)
+        var recordStart = recordBuffer.startIndex
+        for index in recordBuffer.indices {
+            let byte = recordBuffer[index]
+            guard byte == 0x0A || byte == 0x0D else { continue }
+            onRecord(String(decoding: recordBuffer[recordStart..<index], as: UTF8.self))
+            recordStart = recordBuffer.index(after: index)
+        }
+        if recordStart != recordBuffer.startIndex {
+            recordBuffer.removeSubrange(recordBuffer.startIndex..<recordStart)
+        }
+    }
+
+    private func trimCapturedDataLocked() {
+        guard capturedData.count > captureLimit else { return }
+        let removeCount = capturedData.count - captureLimit
+        capturedData.removeSubrange(capturedData.startIndex..<capturedData.index(capturedData.startIndex, offsetBy: removeCount))
+        wasTruncated = true
+    }
+}
+
 class TableAdapter: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     struct Item {
         let name: String
@@ -620,10 +705,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     let preScanTimeout: TimeInterval = 120
     let localPreScanTimeout: TimeInterval = 300
     let commandKillGrace: TimeInterval = 5
+    let streamingOutputCaptureLimit = 4 * 1024 * 1024
     // Abort rsync only after a long period without output, not by total runtime.
     let copyTimeout: TimeInterval = 1800
     var debugWindow: NSWindow?
     var debugTextView: NSTextView?
+    var debugLogRecentLines: [String] = []
+    var debugLogPendingWindowLines: [String] = []
+    var debugLogFlushRequested = false
+    let debugLogQueue = DispatchQueue(label: "MoveFolders.debugLog")
+    let debugLogRecentLineLimit = 2_500
+    let debugLogWindowRefreshInterval: TimeInterval = 0.25
     var transferLogWindow: NSWindow?
     var transferLogTextView: NSTextView?
     var transferLogFileHandle: FileHandle?
@@ -5649,24 +5741,6 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (task.terminationStatus, output)
     }
 
-    func appendStreamingData(_ data: Data, to buffer: inout Data) -> [String] {
-        buffer.append(data)
-        var records: [String] = []
-        var recordStart = buffer.startIndex
-
-        for index in buffer.indices {
-            let byte = buffer[index]
-            guard byte == 0x0A || byte == 0x0D else { continue }
-            records.append(String(decoding: buffer[recordStart..<index], as: UTF8.self))
-            recordStart = buffer.index(after: index)
-        }
-
-        if recordStart != buffer.startIndex {
-            buffer.removeSubrange(buffer.startIndex..<recordStart)
-        }
-        return records
-    }
-
     func runCommandStreaming(_ cmd: String, timeout: TimeInterval? = nil, killGrace: TimeInterval = 5, processStarted: ((Process) -> Void)? = nil, processFinished: ((Process) -> Void)? = nil, onLine: @escaping (String) -> Void) -> (exitCode: Int32, output: String, timedOut: Bool) {
         log("Run command (stream): \(cmd)")
         let task = Process()
@@ -5676,8 +5750,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         task.standardOutput = pipe
         task.standardError = pipe
 
-        var outputData = Data()
-        var buffer = Data()
+        let streamOutput = StreamingProcessOutput(captureLimit: streamingOutputCaptureLimit)
         let sem = DispatchSemaphore(value: 0)
         let lastOutputQueue = DispatchQueue(label: "MoveFolders.runCommandStreaming.lastOutput")
         var lastOutput = Date()
@@ -5716,28 +5789,18 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
 
         pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard data.count > 0 else { return }
-            outputData.append(data)
-            lastOutputQueue.sync { lastOutput = Date() }
-            for record in self.appendStreamingData(data, to: &buffer) {
-                onLine(record)
-            }
+            streamOutput.readAvailable(
+                from: handle,
+                onData: { lastOutputQueue.sync { lastOutput = Date() } },
+                onRecord: onLine
+            )
         }
 
         task.terminationHandler = { _ in
             pipe.fileHandleForReading.readabilityHandler = nil
             heartbeatTimer.cancel()
             timeoutTimer?.cancel()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            outputData.append(data)
-            for record in self.appendStreamingData(data, to: &buffer) {
-                onLine(record)
-            }
-            if !buffer.isEmpty {
-                onLine(String(decoding: buffer, as: UTF8.self))
-                buffer.removeAll()
-            }
+            streamOutput.finishReading(from: pipe.fileHandleForReading, onRecord: onLine)
             processFinished?(task)
             sem.signal()
         }
@@ -5745,6 +5808,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         do {
             try task.run()
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            streamOutput.stopWithoutDraining()
             heartbeatTimer.cancel()
             timeoutTimer?.cancel()
             log("Command start failed: \(error.localizedDescription)")
@@ -5757,7 +5822,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         sem.wait()
         log("Command exit: \(task.terminationStatus) reason \(task.terminationReason.rawValue)")
         let timedOut = timeoutQueue.sync { didTimeout }
-        return (task.terminationStatus, String(decoding: outputData, as: UTF8.self), timedOut)
+        let outputSnapshot = streamOutput.snapshot()
+        var output = String(decoding: outputSnapshot.data, as: UTF8.self)
+        if outputSnapshot.wasTruncated {
+            output = "[Eerdere command-uitvoer weggelaten; laatste 4 MB getoond]\n" + output
+        }
+        return (task.terminationStatus, output, timedOut)
     }
 
     func isRetryableCopyFailure(exitCode: Int32, output: String, timedOut: Bool) -> Bool {
@@ -5853,7 +5923,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             task.standardOutput = pipe
             task.standardError = pipe
 
-            var outputData = Data()
+            let streamOutput = StreamingProcessOutput(captureLimit: streamingOutputCaptureLimit)
             let sem = DispatchSemaphore(value: 0)
             let lastOutputQueue = DispatchQueue(label: "MoveFolders.copy.lastOutput")
             var lastOutput = Date()
@@ -5889,47 +5959,49 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                     }
                 }
             }
-            pipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard data.count > 0 else { return }
-                outputData.append(data)
-                guard let chunk = String(data: data, encoding: .utf8) else { return }
-                lastOutputQueue.sync { lastOutput = Date() }
-                let normalizedChunk = chunk.replacingOccurrences(of: "\r", with: "\n")
-                let lines = normalizedChunk.split(separator: "\n")
-                for l in lines {
-                    let trimmed = l.trimmingCharacters(in: .whitespaces)
-                    if !trimmed.isEmpty {
-                        var logLine = trimmed
-                        if logLine.hasPrefix(self.rsyncOutFormatMarker) {
-                            let rel = String(logLine.dropFirst(self.rsyncOutFormatMarker.count)).trimmingCharacters(in: .whitespaces)
-                            registerTransferredPath(rel)
-                            logLine = rel.isEmpty ? "bestandsupdate" : "bestandsupdate: \(rel)"
-                        } else if !self.rsyncConfig.supportsOutFormat {
-                            registerTransferredPath(logLine)
-                        }
-                        self.log("rsync: \(logLine)")
+
+            func processCopyRecord(_ record: String) {
+                let trimmed = record.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    var logLine = trimmed
+                    if logLine.hasPrefix(self.rsyncOutFormatMarker) {
+                        let rel = String(logLine.dropFirst(self.rsyncOutFormatMarker.count)).trimmingCharacters(in: .whitespaces)
+                        registerTransferredPath(rel)
+                        logLine = rel.isEmpty ? "bestandsupdate" : "bestandsupdate: \(rel)"
+                    } else if !self.rsyncConfig.supportsOutFormat {
+                        registerTransferredPath(logLine)
                     }
-                    if let metrics = self.rsyncProgressMetrics(from: trimmed) {
-                        self.updateProgressMetrics(speed: metrics.speed, eta: metrics.eta)
-                        self.updateCurrentFileProgress(percent: metrics.percent)
-                        self.updateProgressFromRsync(toChk: metrics.toCheck)
-                    } else if !trimmed.isEmpty {
-                        self.updateCurrentFile(from: trimmed, srcBase: srcBase, dstBase: dstBase, taskName: name)
-                    }
+                    self.log("rsync: \(logLine)")
                 }
+                if let metrics = self.rsyncProgressMetrics(from: trimmed) {
+                    self.updateProgressMetrics(speed: metrics.speed, eta: metrics.eta)
+                    self.updateCurrentFileProgress(percent: metrics.percent)
+                    self.updateProgressFromRsync(toChk: metrics.toCheck)
+                } else if !trimmed.isEmpty {
+                    self.updateCurrentFile(from: trimmed, srcBase: srcBase, dstBase: dstBase, taskName: name)
+                }
+            }
+
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                streamOutput.readAvailable(
+                    from: handle,
+                    onData: { lastOutputQueue.sync { lastOutput = Date() } },
+                    onRecord: processCopyRecord
+                )
             }
 
             task.terminationHandler = { _ in
                 pipe.fileHandleForReading.readabilityHandler = nil
                 heartbeatTimer.cancel()
                 self.setActiveTransferProcess(nil)
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                outputData.append(data)
+                streamOutput.finishReading(from: pipe.fileHandleForReading, onRecord: processCopyRecord)
                 sem.signal()
             }
 
             do { try task.run() } catch {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                streamOutput.stopWithoutDraining()
+                heartbeatTimer.cancel()
                 let output = "Kan rsync niet starten: \(error.localizedDescription)"
                 self.log(output)
                 return (false, 1, output, false)
@@ -5941,7 +6013,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             self.setActiveTransferProcess(nil)
 
             let timedOut = timeoutQueue.sync { didTimeout }
-            let output = String(decoding: outputData, as: UTF8.self)
+            let outputSnapshot = streamOutput.snapshot()
+            var output = String(decoding: outputSnapshot.data, as: UTF8.self)
+            if outputSnapshot.wasTruncated {
+                output = "[Eerdere rsync-uitvoer weggelaten; laatste 4 MB getoond]\n" + output
+            }
             for outputLine in output.replacingOccurrences(of: "\r", with: "\n").split(separator: "\n") {
                 let trimmed = outputLine.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix(self.rsyncOutFormatMarker) {
@@ -6615,6 +6691,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     func showDebugWindow() {
+        let recentText = debugLogQueue.sync { () -> String in
+            debugLogPendingWindowLines.removeAll(keepingCapacity: true)
+            return debugLogRecentLines.joined()
+        }
+        debugTextView?.string = recentText
+        debugTextView?.scrollToEndOfDocument(nil)
         debugWindow?.center()
         debugWindow?.makeKeyAndOrderFront(nil)
     }
@@ -6839,24 +6921,57 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             .compactMap { Int($0) }
     }
 
+    func enqueueDebugLog(_ line: String) {
+        debugLogQueue.async {
+            self.debugLogRecentLines.append(line)
+            if self.debugLogRecentLines.count > self.debugLogRecentLineLimit + 500 {
+                let removeCount = self.debugLogRecentLines.count - self.debugLogRecentLineLimit
+                self.debugLogRecentLines.removeFirst(removeCount)
+            }
+            self.debugLogPendingWindowLines.append(line)
+            if self.debugLogPendingWindowLines.count > self.debugLogRecentLineLimit + 500 {
+                let removeCount = self.debugLogPendingWindowLines.count - self.debugLogRecentLineLimit
+                self.debugLogPendingWindowLines.removeFirst(removeCount)
+            }
+            guard !self.debugLogFlushRequested else { return }
+            self.debugLogFlushRequested = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.debugLogWindowRefreshInterval) {
+                self.flushDebugLogWindowUpdates()
+            }
+        }
+    }
+
+    func flushDebugLogWindowUpdates() {
+        let pendingText = debugLogQueue.sync { () -> String in
+            debugLogFlushRequested = false
+            let text = debugLogPendingWindowLines.joined()
+            debugLogPendingWindowLines.removeAll(keepingCapacity: true)
+            return text
+        }
+        guard !pendingText.isEmpty,
+              debugWindow?.isVisible == true,
+              let textView = debugTextView,
+              let storage = textView.textStorage else { return }
+
+        let shouldFollowTail = transferLogIsNearBottom(textView)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.white,
+            .font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        ]
+        storage.append(NSAttributedString(string: pendingText, attributes: attrs))
+        if storage.length > 250_000 {
+            storage.deleteCharacters(in: NSRange(location: 0, length: storage.length - 200_000))
+        }
+        if shouldFollowTail {
+            textView.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+        }
+    }
+
     func log(_ message: String) {
         let ts = logFormatterQueue.sync { logFormatter.string(from: Date()) }
         let line = "[\(ts)] \(message)"
         print(line)
-        DispatchQueue.main.async {
-            guard let textView = self.debugTextView, let storage = textView.textStorage else { return }
-            let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: NSColor.white,
-                .font: font
-            ]
-            storage.append(NSAttributedString(string: line + "\n", attributes: attrs))
-            if storage.length > 200_000 {
-                let trim = storage.length - 150_000
-                storage.deleteCharacters(in: NSRange(location: 0, length: trim))
-            }
-            textView.scrollToEndOfDocument(nil)
-        }
+        enqueueDebugLog(line + "\n")
     }
 }
 
