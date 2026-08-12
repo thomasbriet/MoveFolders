@@ -588,6 +588,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var syncReconnectLastAttempt: [String: Date] = [:]
     var syncReconnectFailureCounts: [String: Int] = [:]
     var syncReconnectInProgressKeys: Set<String> = []
+    var syncSFMPathsByProfile: [String: Set<String>] = [:]
+    var syncSFMScannedProfileIds: Set<String> = []
     var automaticSyncsPaused = false
     var startHiddenInMenuBar = false
     var mainFolderListsLoaded = false
@@ -602,6 +604,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     let favoritePresetsDefaultsKey = "favoriteTransferPresets"
     let resumeJobDefaultsKey = "lastResumeJob"
     let syncProfilesDefaultsKey = "syncProfiles"
+    let syncSFMCompatibilityDefaultsKey = "syncSFMCompatibility"
     let automaticSyncsPausedDefaultsKey = "automaticSyncsPaused"
     let startHiddenInMenuBarDefaultsKey = "startHiddenInMenuBar"
     let recentSourceLimit = 5
@@ -712,6 +715,26 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var lastStatus: String
         var consecutiveFailures: Int
         var updatedAt: Date
+    }
+
+    struct SyncSFMCompatibilityState: Codable {
+        var pathsByProfile: [String: [String]]
+        var scannedProfileIds: [String]
+    }
+
+    struct SyncSFMPreparationResult {
+        var paths: Set<String>
+        var roots: Set<String>
+        var cancelled: Bool
+    }
+
+    struct SyncSFMTransferResult {
+        var copied: Int
+        var skipped: Int
+        var deleted: Int
+        var failures: [String]
+        var cancelled: Bool
+        var affectedDirectories: Set<String>
     }
 
     struct NetworkMountInfo {
@@ -917,6 +940,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         favoritePresets = loadFavoritePresets()
         lastResumeJob = loadResumeJob()
         syncProfiles = loadSyncProfiles()
+        loadSyncSFMCompatibilityState()
         let resetSyncFailureProfileCount = resetSyncFailureCountersForNewSession()
         recentSourcePopup = makePopup(380, 575, 180, #selector(selectRecentSource))
         recentDestinationPopup = makePopup(380, 545, 180, #selector(selectRecentDestination))
@@ -1137,6 +1161,26 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         refreshLoginItemSettingsUI()
         guard window != nil, window.isMiniaturized else { return }
         restoreMainWindow()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        let syncProcesses = syncStateQueue.sync { () -> [(String, Process)] in
+            for id in syncRunningProfileIds { syncCancellationRequestedProfileIds.insert(id) }
+            return Array(syncActiveProcesses)
+        }
+        for (profileId, process) in syncProcesses where process.isRunning {
+            let processIDs = processTreeIDs(rootPID: process.processIdentifier)
+            log("App sluit: actieve sync stoppen | profiel \(profileId) | pids \(processIDs.map(String.init).joined(separator: ", "))")
+            for processID in processIDs.reversed() { _ = Darwin.kill(processID, SIGTERM) }
+        }
+        let transferProcess = transferControlQueue.sync { () -> Process? in
+            transferCancelRequested = true
+            return activeTransferProcess
+        }
+        if let transferProcess, transferProcess.isRunning {
+            transferProcess.terminate()
+        }
+        transferLogQueue.sync { transferLogFileHandle?.synchronizeFile() }
     }
 
     func loadMainFolderListsIfNeeded() {
@@ -2683,6 +2727,37 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return decoded
     }
 
+    func loadSyncSFMCompatibilityState() {
+        guard let data = recentSourceDefaults.data(forKey: syncSFMCompatibilityDefaultsKey),
+              let decoded = try? JSONDecoder().decode(SyncSFMCompatibilityState.self, from: data) else { return }
+        syncSFMPathsByProfile = decoded.pathsByProfile.mapValues { Set($0) }
+        syncSFMScannedProfileIds = Set(decoded.scannedProfileIds)
+    }
+
+    func syncSFMCompatibilitySnapshot(profileId: String) -> (paths: Set<String>, scanned: Bool) {
+        syncStateQueue.sync {
+            (syncSFMPathsByProfile[profileId] ?? [], syncSFMScannedProfileIds.contains(profileId))
+        }
+    }
+
+    func updateSyncSFMCompatibilityState(profileId: String, discoveredPaths: Set<String>, markScanned: Bool) {
+        let encodedState: Data? = syncStateQueue.sync {
+            if !discoveredPaths.isEmpty {
+                syncSFMPathsByProfile[profileId, default: []].formUnion(discoveredPaths)
+            }
+            if markScanned { syncSFMScannedProfileIds.insert(profileId) }
+            let state = SyncSFMCompatibilityState(
+                pathsByProfile: syncSFMPathsByProfile.mapValues { Array($0).sorted() },
+                scannedProfileIds: Array(syncSFMScannedProfileIds).sorted()
+            )
+            return try? JSONEncoder().encode(state)
+        }
+        if let encodedState {
+            recentSourceDefaults.set(encodedState, forKey: syncSFMCompatibilityDefaultsKey)
+            recentSourceDefaults.synchronize()
+        }
+    }
+
     func resetSyncFailureCountersForNewSession() -> Int {
         var resetCount = 0
         for index in syncProfiles.indices where syncProfiles[index].consecutiveFailures != 0 {
@@ -2799,6 +2874,295 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         guard rsyncConfig.supportsIconv,
               networkMountInfo(forPath: path) != nil else { return nil }
         return "--iconv=UTF-8,UTF-8-MAC"
+    }
+
+    func pathContainsSFMCharacter(_ path: String) -> Bool {
+        path.unicodeScalars.contains { (0xF001...0xF029).contains($0.value) }
+    }
+
+    func translatedSFMScalar(_ scalar: UnicodeScalar) -> UnicodeScalar? {
+        switch scalar.value {
+        case 0xF001...0xF01F: return UnicodeScalar(scalar.value - 0xF000)
+        case 0xF020: return UnicodeScalar(0x22)
+        case 0xF021: return UnicodeScalar(0x2A)
+        case 0xF022: return UnicodeScalar(0x3A)
+        case 0xF023: return UnicodeScalar(0x3C)
+        case 0xF024: return UnicodeScalar(0x3E)
+        case 0xF025: return UnicodeScalar(0x3F)
+        case 0xF026: return UnicodeScalar(0x5C)
+        case 0xF027: return UnicodeScalar(0x7C)
+        case 0xF028: return UnicodeScalar(0x20)
+        case 0xF029: return UnicodeScalar(0x2E)
+        default: return nil
+        }
+    }
+
+    func safeSFMPath(relativePath: String, basePath: String) -> String? {
+        guard !relativePath.isEmpty, !relativePath.hasPrefix("/") else { return nil }
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.contains(where: { $0.isEmpty || $0 == ".." }) else { return nil }
+        return (basePath as NSString).appendingPathComponent(relativePath)
+    }
+
+    func translatedSFMRelativePath(_ relativePath: String) -> String? {
+        guard pathContainsSFMCharacter(relativePath) else { return relativePath }
+        var result = String.UnicodeScalarView()
+        for scalar in relativePath.unicodeScalars {
+            if (0xF001...0xF029).contains(scalar.value) {
+                guard let translated = translatedSFMScalar(scalar) else { return nil }
+                result.append(translated)
+            } else {
+                result.append(scalar)
+            }
+        }
+        return String(result)
+    }
+
+    func syncSFMRootPath(for relativePath: String) -> String? {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !components.isEmpty, !components.contains(""), !components.contains("..") else { return nil }
+        guard let specialIndex = components.firstIndex(where: { pathContainsSFMCharacter($0) }) else { return nil }
+        return components.prefix(specialIndex + 1).joined(separator: "/")
+    }
+
+    func unchangedParentDirectoriesForSFMPath(_ relativePath: String) -> Set<String> {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard let specialIndex = components.firstIndex(where: { pathContainsSFMCharacter($0) }) else {
+            return affectedDirectoryPaths(relativePath: relativePath, includePathItself: false)
+        }
+        var result: Set<String> = ["."]
+        if specialIndex > 0 {
+            for count in 1...specialIndex { result.insert(components.prefix(count).joined(separator: "/")) }
+        }
+        return result
+    }
+
+    func scanSyncSFMPaths(
+        srcBase: String,
+        relativeRoot: String?,
+        profile: SyncProfile
+    ) -> (paths: Set<String>, cancelled: Bool, completed: Bool) {
+        let fm = FileManager.default
+        let scanPath: String
+        if let relativeRoot {
+            guard let safePath = safeSFMPath(relativePath: relativeRoot, basePath: srcBase) else {
+                return ([], false, false)
+            }
+            scanPath = safePath
+        } else {
+            scanPath = srcBase
+        }
+
+        var result = Set<String>()
+        if let relativeRoot, pathContainsSFMCharacter(relativeRoot) {
+            result.insert(relativeRoot)
+        }
+        guard let enumerator = fm.enumerator(atPath: scanPath) else { return (result, false, false) }
+        var scanned = 0
+        for case let child as String in enumerator {
+            if syncCancellationRequested(for: profile.id) { return (result, true, false) }
+            scanned += 1
+            let relativePath = relativeRoot.map { ($0 as NSString).appendingPathComponent(child) } ?? child
+            if pathContainsSFMCharacter(relativePath) { result.insert(relativePath) }
+            if scanned == 1 || scanned % 2_000 == 0 {
+                updateSyncProgress(profileId: profile.id, detail: "SMB-namen controleren: \(scanned) items")
+            }
+        }
+        return (result, false, true)
+    }
+
+    func prepareSyncSFMCompatibility(srcBase: String, profile: SyncProfile) -> SyncSFMPreparationResult {
+        var snapshot = syncSFMCompatibilitySnapshot(profileId: profile.id)
+        if !snapshot.scanned {
+            log("Sync SMB-naamcontrole gestart: \(profile.name)")
+            let initialScan = scanSyncSFMPaths(srcBase: srcBase, relativeRoot: nil, profile: profile)
+            if initialScan.cancelled {
+                return SyncSFMPreparationResult(paths: snapshot.paths, roots: [], cancelled: true)
+            }
+            snapshot.paths.formUnion(initialScan.paths)
+            updateSyncSFMCompatibilityState(
+                profileId: profile.id,
+                discoveredPaths: initialScan.paths,
+                markScanned: initialScan.completed
+            )
+            log("Sync SMB-naamcontrole klaar: \(profile.name) | \(initialScan.paths.count) SFM-pad(en)")
+        }
+
+        let knownRoots = Set(snapshot.paths.compactMap(syncSFMRootPath))
+        var expandedPaths = snapshot.paths
+        for root in knownRoots.sorted() {
+            if syncCancellationRequested(for: profile.id) {
+                return SyncSFMPreparationResult(paths: expandedPaths, roots: knownRoots, cancelled: true)
+            }
+            guard let sourcePath = safeSFMPath(relativePath: root, basePath: srcBase) else { continue }
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: sourcePath, isDirectory: &isDirectory), isDirectory.boolValue {
+                let scan = scanSyncSFMPaths(srcBase: srcBase, relativeRoot: root, profile: profile)
+                if scan.cancelled {
+                    return SyncSFMPreparationResult(paths: expandedPaths, roots: knownRoots, cancelled: true)
+                }
+                expandedPaths.formUnion(scan.paths)
+            }
+        }
+        if expandedPaths != snapshot.paths {
+            updateSyncSFMCompatibilityState(profileId: profile.id, discoveredPaths: expandedPaths, markScanned: false)
+        }
+        let roots = Set(expandedPaths.compactMap(syncSFMRootPath))
+        return SyncSFMPreparationResult(paths: expandedPaths, roots: roots, cancelled: false)
+    }
+
+    func escapedRsyncFilterPath(_ path: String) -> String {
+        var result = ""
+        for character in path {
+            if character == "\\" || character == "*" || character == "?" || character == "[" {
+                result.append("\\")
+            }
+            result.append(character)
+        }
+        return result
+    }
+
+    func syncSFMFilterFlags(roots: Set<String>) -> String {
+        roots.sorted().compactMap { root -> String? in
+            guard let translated = translatedSFMRelativePath(root) else { return nil }
+            let sourceRule = "H /\(escapedRsyncFilterPath(root))"
+            let destinationRule = "P /\(escapedRsyncFilterPath(translated))"
+            return "--filter=\(shellQuote(sourceRule)) --filter=\(shellQuote(destinationRule))"
+        }.joined(separator: " ")
+    }
+
+    func syncSFMItemIsCurrent(sourceAttributes: [FileAttributeKey: Any], destinationPath: String) -> Bool {
+        guard let destinationAttributes = try? FileManager.default.attributesOfItem(atPath: destinationPath),
+              sourceAttributes[.type] as? FileAttributeType == destinationAttributes[.type] as? FileAttributeType else { return false }
+        if sourceAttributes[.type] as? FileAttributeType == .typeDirectory { return true }
+        guard let sourceSize = sourceAttributes[.size] as? NSNumber,
+              let destinationSize = destinationAttributes[.size] as? NSNumber,
+              sourceSize.uint64Value == destinationSize.uint64Value,
+              let sourceDate = sourceAttributes[.modificationDate] as? Date,
+              let destinationDate = destinationAttributes[.modificationDate] as? Date else { return false }
+        return abs(sourceDate.timeIntervalSince(destinationDate)) <= timeTolerance
+    }
+
+    func synchronizeSFMPaths(
+        preparation: SyncSFMPreparationResult,
+        srcBase: String,
+        dstBase: String,
+        profile: SyncProfile
+    ) -> SyncSFMTransferResult {
+        let fm = FileManager.default
+        var result = SyncSFMTransferResult(copied: 0, skipped: 0, deleted: 0, failures: [], cancelled: false, affectedDirectories: [])
+        guard !preparation.paths.isEmpty else { return result }
+
+        let sortedPaths = preparation.paths.sorted {
+            let leftDepth = directoryPathDepth($0)
+            let rightDepth = directoryPathDepth($1)
+            return leftDepth == rightDepth ? $0 < $1 : leftDepth < rightDepth
+        }
+        for (index, relativePath) in sortedPaths.enumerated() {
+            if syncCancellationRequested(for: profile.id) {
+                result.cancelled = true
+                return result
+            }
+            guard let translatedPath = translatedSFMRelativePath(relativePath),
+                  let sourcePath = safeSFMPath(relativePath: relativePath, basePath: srcBase),
+                  let destinationPath = safeSFMPath(relativePath: translatedPath, basePath: dstBase) else {
+                result.failures.append("\(relativePath): niet-ondersteunde SMB-naam")
+                continue
+            }
+            updateSyncProgress(profileId: profile.id, detail: "SMB-naam \(index + 1)/\(sortedPaths.count): \(relativePath)")
+
+            guard let sourceAttributes = try? fm.attributesOfItem(atPath: sourcePath) else {
+                if profile.deleteExtra, fm.fileExists(atPath: destinationPath) {
+                    do {
+                        try fm.removeItem(atPath: destinationPath)
+                        result.deleted += 1
+                        result.affectedDirectories.formUnion(unchangedParentDirectoriesForSFMPath(relativePath))
+                        recordTransferLog(status: "SYNC SFM VERWIJDERD", relativePath: translatedPath, dstBase: dstBase, detail: "profiel: \(profile.name)")
+                    } catch {
+                        result.failures.append("\(translatedPath): verwijderen mislukt: \(error.localizedDescription)")
+                    }
+                }
+                continue
+            }
+
+            let itemType = sourceAttributes[.type] as? FileAttributeType
+            if itemType == .typeDirectory {
+                do {
+                    try fm.createDirectory(atPath: destinationPath, withIntermediateDirectories: true)
+                    result.affectedDirectories.formUnion(unchangedParentDirectoriesForSFMPath(relativePath))
+                } catch {
+                    result.failures.append("\(translatedPath): map maken mislukt: \(error.localizedDescription)")
+                }
+                continue
+            }
+            guard itemType == .typeRegular || itemType == .typeSymbolicLink else {
+                result.failures.append("\(relativePath): niet-ondersteund bestandstype")
+                continue
+            }
+            if syncSFMItemIsCurrent(sourceAttributes: sourceAttributes, destinationPath: destinationPath) {
+                result.skipped += 1
+                continue
+            }
+
+            do {
+                try fm.createDirectory(atPath: (destinationPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            } catch {
+                result.failures.append("\(translatedPath): doelmap maken mislukt: \(error.localizedDescription)")
+                continue
+            }
+            let flags = rsyncFlags(includePartial: true, includeXattrs: profile.copyXattrs, includePermissions: false)
+            let command = "\(shellQuote(rsyncPath)) \(flags) \(shellQuote(sourcePath)) \(shellQuote(destinationPath))"
+            let copyResult = runCommandStreaming(
+                command,
+                timeout: nil,
+                killGrace: commandKillGrace,
+                processStarted: { process in self.registerActiveSyncProcess(process, profileId: profile.id) },
+                processFinished: { process in self.unregisterActiveSyncProcess(process, profileId: profile.id) },
+                onLine: { line in
+                    if let metrics = self.rsyncProgressMetrics(from: line) {
+                        self.updateSyncProgress(profileId: profile.id, speed: metrics.speed, eta: metrics.eta)
+                    }
+                }
+            )
+            if syncCancellationRequested(for: profile.id) {
+                result.cancelled = true
+                return result
+            }
+            guard copyResult.exitCode == 0, !copyResult.timedOut else {
+                result.failures.append("\(relativePath): kopiëren mislukt (rsync code \(copyResult.exitCode))")
+                continue
+            }
+            if let sourceDate = sourceAttributes[.modificationDate] as? Date,
+               !setModificationDate(path: destinationPath, date: sourceDate) {
+                result.failures.append("\(translatedPath): wijzigingsdatum kon niet worden hersteld")
+                continue
+            }
+            result.copied += 1
+            result.affectedDirectories.formUnion(unchangedParentDirectoriesForSFMPath(relativePath))
+            recordTransferLog(
+                status: "SYNC SFM OVERGEZET",
+                relativePath: translatedPath,
+                srcBase: srcBase,
+                dstBase: dstBase,
+                detail: "bron-SFM-pad: \(relativePath) | profiel: \(profile.name)"
+            )
+        }
+        let specialDirectories = sortedPaths.reversed().filter { relativePath in
+            guard let sourcePath = safeSFMPath(relativePath: relativePath, basePath: srcBase),
+                  let attributes = try? fm.attributesOfItem(atPath: sourcePath) else { return false }
+            return attributes[.type] as? FileAttributeType == .typeDirectory
+        }
+        for relativePath in specialDirectories {
+            guard let translatedPath = translatedSFMRelativePath(relativePath),
+                  let sourcePath = safeSFMPath(relativePath: relativePath, basePath: srcBase),
+                  let destinationPath = safeSFMPath(relativePath: translatedPath, basePath: dstBase),
+                  let attributes = try? fm.attributesOfItem(atPath: sourcePath),
+                  let sourceDate = attributes[.modificationDate] as? Date else { continue }
+            if !setModificationDate(path: destinationPath, date: sourceDate) {
+                result.failures.append("\(translatedPath): mapdatum kon niet worden hersteld")
+            }
+        }
+        return result
     }
 
     func mountedVolumeURL(forRemountURLString remountURLString: String) -> URL? {
@@ -3836,6 +4200,29 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             return
         }
 
+        let sfmPreparation = prepareSyncSFMCompatibility(srcBase: srcPath, profile: profile)
+        if sfmPreparation.cancelled || syncCancellationRequested(for: profile.id) {
+            finishCancelledSync(profile)
+            return
+        }
+        let sfmTransfer = synchronizeSFMPaths(
+            preparation: sfmPreparation,
+            srcBase: srcPath,
+            dstBase: dstPath,
+            profile: profile
+        )
+        if sfmTransfer.cancelled || syncCancellationRequested(for: profile.id) {
+            finishCancelledSync(profile)
+            return
+        }
+        for failure in sfmTransfer.failures {
+            log("Sync SFM-naam mislukt: \(profile.name) | \(failure)")
+            recordTransferLog(status: "SYNC SFM MISLUKT", relativePath: profile.name, detail: failure)
+        }
+        if !sfmPreparation.paths.isEmpty {
+            log("Sync SFM-naamcontrole: \(profile.name) | \(sfmTransfer.copied) overgezet, \(sfmTransfer.skipped) gelijk, \(sfmTransfer.deleted) verwijderd, \(sfmTransfer.failures.count) mislukt")
+        }
+
         let srcArg = srcPath.hasSuffix("/") ? srcPath : "\(srcPath)/"
         let dstArg = dstPath.hasSuffix("/") ? dstPath : "\(dstPath)/"
         let repairsTimestampsImmediately = rsyncConfig.supportsOutFormat
@@ -3854,6 +4241,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else {
             log("Sync \(profile.name): rsync mist --out-format; datumherstel volgt na de volledige opdracht")
         }
+        let sfmFilterFlags = syncSFMFilterFlags(roots: sfmPreparation.roots)
+        if !sfmFilterFlags.isEmpty {
+            flags += " \(sfmFilterFlags)"
+            log("Sync \(profile.name): \(sfmPreparation.roots.count) SFM-naampad(en) apart beschermd")
+        }
         if let unicodeNormalizationFlag = syncUnicodeNormalizationFlag(forDestinationPath: dstPath) {
             flags += " \(unicodeNormalizationFlag)"
             log("Sync \(profile.name): Unicode-normalisatie voor netwerkschijf ingeschakeld (UTF-8 -> UTF-8-MAC)")
@@ -3869,7 +4261,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         var pendingTimestampPaths: [String] = []
         var loggedSyncPaths: Set<String> = []
         var transferredPaths: [String] = []
-        var affectedDirectoryPathSet: Set<String> = []
+        var affectedDirectoryPathSet = sfmTransfer.affectedDirectories
+        var discoveredSFMPaths: Set<String> = []
         var pendingSyncEntry: (code: String, path: String)?
 
         func finalizePendingSyncEntry() {
@@ -3943,6 +4336,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             if let currentEntry = self.syncOutFormatEntry(from: trimmed) {
+                if self.pathContainsSFMCharacter(currentEntry.path) {
+                    _ = countQueue.sync { discoveredSFMPaths.insert(currentEntry.path) }
+                }
                 let directoryPaths = self.affectedDirectoryPaths(
                     relativePath: currentEntry.path,
                     includePathItself: self.syncItemizedEntryIsDirectory(currentEntry.code)
@@ -3981,6 +4377,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                     }
                 }
             } else if let entry = self.syncItemizedEntry(from: trimmed) {
+                if self.pathContainsSFMCharacter(entry.path) {
+                    _ = countQueue.sync { discoveredSFMPaths.insert(entry.path) }
+                }
                 let directoryPaths = self.affectedDirectoryPaths(
                     relativePath: entry.path,
                     includePathItself: self.syncItemizedEntryIsDirectory(entry.code)
@@ -4022,7 +4421,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             countQueue.sync { pendingSyncEntry = nil }
         }
         let snapshot = countQueue.sync {
-            (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths, Array(affectedDirectoryPathSet))
+            (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths, Array(affectedDirectoryPathSet), discoveredSFMPaths)
+        }
+        if !snapshot.7.isEmpty {
+            updateSyncSFMCompatibilityState(profileId: profile.id, discoveredPaths: snapshot.7, markScanned: false)
+            log("Sync \(profile.name): \(snapshot.7.count) nieuw(e) SFM-pad(en) onthouden voor volgende runs")
         }
         var timestampRepair = SyncTimestampRepairResult(repaired: snapshot.4, failed: 0, cancelled: false)
         if !repairsTimestampsImmediately, !syncCancellationRequested(for: profile.id), !result.timedOut {
@@ -4096,10 +4499,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else if result.exitCode == 0 && result.timedOut == false {
             var status = snapshot.0 == 0 && snapshot.1 == 0 ? "OK: niets overgezet" : "OK: \(snapshot.0) bestanden overgezet"
             if snapshot.1 > 0 { status += ", \(snapshot.1) verwijderd" }
+            if sfmTransfer.copied > 0 { status += " | \(sfmTransfer.copied) SMB-naambestanden overgezet" }
+            if sfmTransfer.skipped > 0 { status += " | \(sfmTransfer.skipped) SMB-naambestanden gelijk" }
+            if sfmTransfer.deleted > 0 { status += " | \(sfmTransfer.deleted) SMB-naambestanden verwijderd" }
             if timestampRepair.repaired > 0 { status += " | \(timestampRepair.repaired) wijzigingsdatums hersteld" }
             if directoryTimestampRepair.repaired > 0 { status += " | \(directoryTimestampRepair.repaired) mapdatums hersteld" }
             if snapshot.2 > 0 { status += " | \(snapshot.2) alleen metadata/attributen (inhoud overgeslagen)" }
-            if timestampRepair.failed > 0 || !directoryTimestampRepair.failures.isEmpty {
+            if timestampRepair.failed > 0 || !directoryTimestampRepair.failures.isEmpty || !sfmTransfer.failures.isEmpty {
+                if !sfmTransfer.failures.isEmpty {
+                    status += " | Fout: \(sfmTransfer.failures.count) SMB-naampaden mislukt"
+                }
                 if timestampRepair.failed > 0 {
                     status += " | Fout: \(timestampRepair.failed) bestandsdatums konden niet worden hersteld"
                 }
@@ -4113,6 +4522,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else {
             let timeoutText = result.timedOut ? " timeout" : ""
             var status = "Fout: rsync code \(result.exitCode)\(timeoutText)"
+            if !sfmTransfer.failures.isEmpty { status += " | \(sfmTransfer.failures.count) SMB-naampaden mislukt" }
             if timestampRepair.repaired > 0 { status += " | \(timestampRepair.repaired) wijzigingsdatums alsnog hersteld" }
             if timestampRepair.failed > 0 { status += " | \(timestampRepair.failed) datumreparaties mislukt" }
             finishSyncProfile(profile, success: false, status: status)
@@ -6347,6 +6757,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     func downloadAndOpenUpdate(packageURL: URL, latestVersion: String) {
         guard progressWindow == nil else {
             alert("Wacht tot de lopende overdracht klaar is voordat je een update installeert.")
+            return
+        }
+        let runningIds = syncStateQueue.sync { syncRunningProfileIds }
+        let runningSyncNames = syncProfiles.filter { runningIds.contains($0.id) }.map(\.name)
+        guard runningSyncNames.isEmpty else {
+            alert("Wacht tot de lopende sync klaar is of stop deze eerst voordat je een update installeert.\n\nActief: \(runningSyncNames.joined(separator: ", "))")
             return
         }
 

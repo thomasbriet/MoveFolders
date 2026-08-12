@@ -2,6 +2,22 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.15] - 2026-08-12
+
+### Opgelost
+
+- SMB-servers die SFM-tekens verschillend tonen, bijvoorbeeld `` op Folder A en `>` op Folder B, veroorzaken niet langer bij iedere sync een verwijdering en nieuwe overdracht van hetzelfde bestand.
+- MoveFolders maakt per syncprofiel eenmalig een index van SFM-namen en behandelt deze paden apart. De gewone rsync-run verbergt de bronvariant en beschermt de equivalente doelvariant tegen `--delete`.
+- De volledige macOS SFM-tabel wordt ondersteund, inclusief `` als afsluitende punt en de privétekens voor ongeldige Windows-/SMB-naamtekens.
+- SFM-bestanden worden op grootte en wijzigingsdatum vergeleken, alleen indien nodig naar de equivalente doelnaam gekopieerd en direct van de juiste bronwijzigingsdatum voorzien.
+- SFM-mappen behouden eveneens hun wijzigingsdatum. Verwijderde SFM-bronpaden worden alleen op het doel verwijderd wanneer `Extra bestanden op doel verwijderen` voor het profiel aanstaat.
+- Een app-update kan niet meer worden gestart zolang een sync actief is. Dit voorkomt dat een update of herstart rsync beëindigt voordat de wijzigingsdatum van het laatst afgeronde bestand is hersteld.
+- Bij het afsluiten van MoveFolders worden actieve rsync-procesbomen expliciet gestopt en wordt het overdrachtslog eerst weggeschreven; er blijven daardoor geen verweesde syncprocessen achter.
+
+### Getest
+
+- Op de gebruikte SMB-doelschijf zijn zowel `` ↔ `>` als `` ↔ afsluitende punt getest. Na de gerichte verwerking meldde een rsync-dry-run met `--delete` geen verwijdering of nieuwe overdracht en waren grootte en wijzigingsdatum exact gelijk.
+
 ## [0.9.14] - 2026-08-11
 
 ### Opgelost
