@@ -2,6 +2,19 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.17] - 2026-08-13
+
+### Opgelost
+
+- Terugkerende `SYNC NIET OVERGEZET`-meldingen met rsync-code `.f.....g....` zijn opgelost. Deze bestanden hadden al exact dezelfde inhoud, grootte en wijzigingsdatum; alleen de Unix-groep verschilde tussen de lokale bron en het SMB-doel.
+- De rsync-capaciteitsdetectie test `--no-owner` en `--no-group` nu rechtstreeks. Rsync ondersteunt de algemene vorm `--no-OPTION`, maar Homebrew-rsync en de ingebouwde macOS-openrsync tonen deze varianten niet betrouwbaar in `--help`.
+- SMB-syncs proberen daardoor geen gebruikers- of groepsmetadata meer te bewaren wanneer bestandsrechten zijn uitgeschakeld. Een server die bron-groep `admin` als doel-groep `staff` presenteert veroorzaakt niet langer bij iedere sync dezelfde metadatamelding.
+
+### Getest
+
+- Alle 14 gemelde 30Seconds-, TinyTins-, template- en Erikding-fontbestanden zijn byte voor byte en op grootte en wijzigingsdatum gecontroleerd. Met `--no-group --no-owner` geeft geen van deze bestanden nog een rsync-wijziging.
+- Zowel rsync 3.4.1 van Homebrew als de ingebouwde macOS-rsync accepteert de gebruikte opties.
+
 ## [0.9.16] - 2026-08-12
 
 ### Opgelost

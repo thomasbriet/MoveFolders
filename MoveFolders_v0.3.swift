@@ -478,6 +478,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             if version.exitCode != 0 { continue }
 
             let help = runCommand("\(quoted) --help").output.lowercased()
+            let supportsNoOwner = runCommand("\(quoted) --no-owner --version").exitCode == 0
+            let supportsNoGroup = runCommand("\(quoted) --no-group --version").exitCode == 0
             let config = RSyncConfig(
                 path: path,
                 supportsProtectArgs: help.contains("--protect-args"),
@@ -486,8 +488,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 supportsCrtimes: help.contains("--crtimes"),
                 supportsXattrs: help.contains("--xattrs"),
                 supportsExtendedAttributes: help.contains("--extended-attributes"),
-                supportsNoOwner: help.contains("--no-owner"),
-                supportsNoGroup: help.contains("--no-group"),
+                // Niet iedere rsync-variant vermeldt --no-OPTION in --help.
+                // Test deze opties daarom rechtstreeks.
+                supportsNoOwner: supportsNoOwner,
+                supportsNoGroup: supportsNoGroup,
                 supportsIconv: help.contains("--iconv")
             )
             log("Rsync geselecteerd: \(path)")
@@ -503,8 +507,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             supportsCrtimes: false,
             supportsXattrs: false,
             supportsExtendedAttributes: true,
-            supportsNoOwner: false,
-            supportsNoGroup: false,
+            supportsNoOwner: true,
+            supportsNoGroup: true,
             supportsIconv: false
         )
         log("Waarschuwing: geen bruikbare rsync gevonden, fallback \(fallback.path)")
