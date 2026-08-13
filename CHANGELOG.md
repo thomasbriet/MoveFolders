@@ -2,6 +2,19 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.18] - 2026-08-13
+
+### Toegevoegd
+
+- Vóór het verwijderen scant MoveFolders iedere bronmap volledig op macOS-vergrendelingen zoals de Finder-optie `Vergrendeld` en de bestandsvlag `uchg`.
+- Als vergrendelde bronitems worden gevonden, vraagt de app expliciet om toestemming met de keuzes `Ontgrendel en verwijder` en `Behoud bronmap`. De kopie op het doel wordt daarbij niet aangepast.
+- Ontgrendelde en bewust behouden bronmappen worden herkenbaar vastgelegd in het overdrachtslog.
+
+### Opgelost
+
+- Een vergrendeld bestand kan niet meer pas halverwege een recursieve verwijdering worden ontdekt. Als toestemming wordt geweigerd of ontgrendelen mislukt, blijft de volledige nog aanwezige bronmap behouden.
+- Na toestemming controleert MoveFolders of iedere vergrendeling daadwerkelijk is verwijderd. Systeemvergrendelingen of andere mislukte ontgrendelingen worden gemeld zonder vervolgens een gedeeltelijke verwijdering te starten.
+
 ## [0.9.17] - 2026-08-13
 
 ### Opgelost

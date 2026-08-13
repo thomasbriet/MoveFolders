@@ -4941,6 +4941,99 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return resp == .alertFirstButtonReturn
     }
 
+    struct ImmutableSourcePath {
+        let absolutePath: String
+        let displayPath: String
+        let isSystemImmutable: Bool
+    }
+
+    func immutableFlags(atPath path: String) -> (user: Bool, system: Bool)? {
+        var fileStat = stat()
+        let status = path.withCString { pointer in
+            Darwin.lstat(pointer, &fileStat)
+        }
+        guard status == 0 else { return nil }
+        return (
+            user: (fileStat.st_flags & UInt32(UF_IMMUTABLE)) != 0,
+            system: (fileStat.st_flags & UInt32(SF_IMMUTABLE)) != 0
+        )
+    }
+
+    func immutableSourcePaths(itemName: String, rootPath: String, fileManager: FileManager) -> [ImmutableSourcePath] {
+        var result: [ImmutableSourcePath] = []
+
+        func inspect(path: String, relativePath: String) {
+            guard let flags = immutableFlags(atPath: path), flags.user || flags.system else { return }
+            let displayPath = relativePath.isEmpty ? itemName : "\(itemName)/\(relativePath)"
+            result.append(
+                ImmutableSourcePath(
+                    absolutePath: path,
+                    displayPath: displayPath,
+                    isSystemImmutable: flags.system
+                )
+            )
+        }
+
+        inspect(path: rootPath, relativePath: "")
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: rootPath, isDirectory: &isDirectory), isDirectory.boolValue,
+              let enumerator = fileManager.enumerator(atPath: rootPath) else {
+            return result
+        }
+
+        for case let relativePath as String in enumerator {
+            let path = (rootPath as NSString).appendingPathComponent(relativePath)
+            inspect(path: path, relativePath: relativePath)
+        }
+        return result
+    }
+
+    func promptToUnlockImmutableSources(itemName: String, paths: [ImmutableSourcePath]) -> Bool {
+        let showAlert = {
+            let count = paths.count
+            let noun = count == 1 ? "bronitem is" : "bronitems zijn"
+            let shownPaths = paths.prefix(8).map { path in
+                let suffix = path.isSystemImmutable ? " (systeemvergrendeld)" : ""
+                return "• \(path.displayPath)\(suffix)"
+            }.joined(separator: "\n")
+            let remaining = count > 8 ? "\n• … (+\(count - 8) meer)" : ""
+            let systemWarning = paths.contains(where: { $0.isSystemImmutable })
+                ? "\n\nSysteemvergrendelde items kunnen mogelijk niet zonder beheerdersrechten worden ontgrendeld."
+                : ""
+
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Vergrendelde bronbestanden gevonden"
+            alert.informativeText = "In ‘\(itemName)’ \(noun) door macOS vergrendeld. Daardoor kan de bronmap niet volledig worden verwijderd.\n\nWil je de vergrendeling verwijderen en daarna de bronmap verwijderen? De kopie op het doel wordt niet aangepast.\n\n\(shownPaths)\(remaining)\(systemWarning)"
+            alert.addButton(withTitle: "Ontgrendel en verwijder")
+            let keepButton = alert.addButton(withTitle: "Behoud bronmap")
+            keepButton.keyEquivalent = "\u{1b}"
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+
+        if Thread.isMainThread { return showAlert() }
+        return DispatchQueue.main.sync { showAlert() }
+    }
+
+    func unlockImmutableSources(_ paths: [ImmutableSourcePath], fileManager: FileManager) -> [String] {
+        var failures: [String] = []
+        let shallowestFirst = paths.sorted {
+            ($0.absolutePath as NSString).pathComponents.count < ($1.absolutePath as NSString).pathComponents.count
+        }
+
+        for path in shallowestFirst {
+            do {
+                try fileManager.setAttributes([.immutable: false], ofItemAtPath: path.absolutePath)
+                if let flags = immutableFlags(atPath: path.absolutePath), flags.user || flags.system {
+                    failures.append("\(path.displayPath): blijft vergrendeld")
+                }
+            } catch {
+                failures.append("\(path.displayPath): \(error.localizedDescription)")
+            }
+        }
+        return failures
+    }
+
     func deleteItems(_ items: [String], from basePath: String) -> [String] {
         func isResourceBusyDeleteError(_ error: Error) -> Bool {
             let ns = error as NSError
@@ -4996,6 +5089,34 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         for nm in items {
             let path = (basePath as NSString).appendingPathComponent(nm)
             if fm.fileExists(atPath: path) {
+                setPhase("Opschonen: bron controleren")
+                log("Controle op vergrendelde bronbestanden: \(path)")
+                let immutablePaths = immutableSourcePaths(itemName: nm, rootPath: path, fileManager: fm)
+                if !immutablePaths.isEmpty {
+                    log("Vergrendelde bronbestanden gevonden in \(path): \(immutablePaths.count)")
+                    guard promptToUnlockImmutableSources(itemName: nm, paths: immutablePaths) else {
+                        let detail = "bron behouden; \(immutablePaths.count) vergrendelde item(s) niet ontgrendeld"
+                        log("Ontgrendelen geweigerd voor \(path); \(detail)")
+                        recordTransferLog(status: "BRON BEHOUDEN", relativePath: nm, srcBase: basePath, detail: detail)
+                        errors.append("\(nm): \(detail)")
+                        continue
+                    }
+
+                    let unlockFailures = unlockImmutableSources(immutablePaths, fileManager: fm)
+                    if !unlockFailures.isEmpty {
+                        let detail = "\(unlockFailures.count) van \(immutablePaths.count) vergrendelde item(s) konden niet worden ontgrendeld; bron behouden"
+                        log("Ontgrendelen mislukt voor \(path): \(unlockFailures.joined(separator: "; "))")
+                        recordTransferLog(status: "BRON ONTGRENDELEN MISLUKT", relativePath: nm, srcBase: basePath, detail: "\(detail) | \(unlockFailures.joined(separator: "; "))")
+                        errors.append("\(nm): \(detail)\n\(unlockFailures.prefix(3).joined(separator: "\n"))")
+                        continue
+                    }
+
+                    let detail = "\(immutablePaths.count) vergrendelde item(s) ontgrendeld na toestemming"
+                    log("Bron ontgrendeld: \(path) (\(immutablePaths.count) item(s))")
+                    recordTransferLog(status: "BRON ONTGRENDELD", relativePath: nm, srcBase: basePath, detail: detail)
+                }
+
+                setPhase("Opschonen")
                 var lastError: Error?
                 for attempt in 1...(retryDelays.count + 1) {
                     do {
