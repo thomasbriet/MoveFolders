@@ -3022,6 +3022,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         path.unicodeScalars.contains { (0xF001...0xF029).contains($0.value) }
     }
 
+    func isTransientSyncLockPath(_ path: String) -> Bool {
+        (path as NSString).pathExtension.caseInsensitiveCompare("idlk") == .orderedSame
+    }
+
+    func syncTransientLockFilterFlags() -> String {
+        ["*.idlk", "*.IDLK"]
+            .map { "--exclude=\(shellQuote($0))" }
+            .joined(separator: " ")
+    }
+
     func translatedSFMScalar(_ scalar: UnicodeScalar) -> UnicodeScalar? {
         switch scalar.value {
         case 0xF001...0xF01F: return UnicodeScalar(scalar.value - 0xF000)
@@ -3096,7 +3106,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
 
         var result = Set<String>()
-        if let relativeRoot, pathContainsSFMCharacter(relativeRoot) {
+        if let relativeRoot,
+           pathContainsSFMCharacter(relativeRoot),
+           !isTransientSyncLockPath(relativeRoot) {
             result.insert(relativeRoot)
         }
         guard let enumerator = fm.enumerator(atPath: scanPath) else { return (result, false, false) }
@@ -3105,7 +3117,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             if syncCancellationRequested(for: profile.id) { return (result, true, false) }
             scanned += 1
             let relativePath = relativeRoot.map { ($0 as NSString).appendingPathComponent(child) } ?? child
-            if pathContainsSFMCharacter(relativePath) { result.insert(relativePath) }
+            if pathContainsSFMCharacter(relativePath), !isTransientSyncLockPath(relativePath) {
+                result.insert(relativePath)
+            }
             if scanned == 1 || scanned % 2_000 == 0 {
                 updateSyncProgress(profileId: profile.id, detail: "SMB-namen controleren: \(scanned) items")
             }
@@ -3132,6 +3146,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
 
         let currentPaths = Set(snapshot.paths.filter { relativePath in
+            guard !isTransientSyncLockPath(relativePath) else { return false }
             guard let sourcePath = safeSFMPath(relativePath: relativePath, basePath: srcBase) else { return false }
             return fm.fileExists(atPath: sourcePath)
         })
@@ -4417,6 +4432,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else {
             log("Sync \(profile.name): rsync mist --out-format; datumherstel volgt na de volledige opdracht")
         }
+        flags += " \(syncTransientLockFilterFlags())"
+        log("Sync \(profile.name): tijdelijke InDesign-lockbestanden (.idlk) worden overgeslagen")
         let sfmFilterFlags = syncSFMFilterFlags(roots: sfmPreparation.roots)
         if !sfmFilterFlags.isEmpty {
             flags += " \(sfmFilterFlags)"

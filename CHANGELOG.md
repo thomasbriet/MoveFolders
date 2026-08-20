@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.21] - 2026-08-20
+
+### Opgelost
+
+- Tijdelijke InDesign-vergrendelbestanden met de extensie `.idlk` worden niet meer gekopieerd door een sync en worden op Folder B beschermd tegen `--delete`.
+- Een geopend InDesign-document op Folder B kan daardoor niet meer de volledige sync laten mislukken met rsync-code 23 en `Resource busy (16)`.
+
+### Getest
+
+- De fout is herleid tot een `.idlk`-bestand dat niet meer in Folder A stond, maar op Folder B nog in gebruik was.
+- Met `--delete` blijft het uitgesloten `.idlk`-bestand behouden, terwijl een gewoon extra testbestand wel voor verwijdering wordt geselecteerd.
+
 ## [0.9.20] - 2026-08-20
 
 ### Opgelost
