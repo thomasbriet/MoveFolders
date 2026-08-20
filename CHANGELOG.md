@@ -2,6 +2,25 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.19] - 2026-08-20
+
+### Opgelost
+
+- Verweesde rsync-tempbestanden bij speciaal vertaalde SMB-namen worden nu samen met het echte doelbestand beschermd. Een onbereikbaar SMB-spookbestand zoals `.FuturTDem..cHLuIO` veroorzaakt daardoor niet meer bij iedere Games-sync rsync-code 23 of 24.
+- De totale syncvoortgang loopt niet meer terug op Macs die de ingebouwde oudere rsync gebruiken. Daar wordt de opdrachtvoortgang nu berekend uit `to-check`/`to-chk`/`ir-chk`, in plaats van het percentage van ieder afzonderlijk bestand als totaalpercentage te tonen.
+- Ook bij incremental recursion kan een reeds getoond opdrachtpercentage niet meer lager worden.
+
+### Verbeterd
+
+- Bij een mislukte sync worden maximaal twaalf concrete rsync-foutregels met bestandsnaam en foutreden als `SYNC RSYNC FOUT` in het overdrachtslog geschreven.
+- De samenvattingsregel bij een rsync-fout toont voortaan ook de eerste concrete foutmelding naast de exitcode.
+
+### Getest
+
+- De problematische `FuturTDem`-map is gericht getest met en zonder tempbescherming. Met de nieuwe filter eindigt de echte rsync-run met code 0 en blijven beide geldige doelvarianten behouden.
+- Een volledige read-only Games-sync met alle SFM-filters eindigt met code 0.
+- Progressieregels van zowel rsync `--info=progress2` als de oudere macOS `--progress`-uitvoer zijn getest, inclusief een teruglopende incremental-recursion-teller.
+
 ## [0.9.18] - 2026-08-13
 
 ### Toegevoegd

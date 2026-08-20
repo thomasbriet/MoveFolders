@@ -2313,6 +2313,46 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return (max(0, min(100, percent)), speed, eta, toCheck)
     }
 
+    func rsyncOverallProgressPercent(rawPercent: Int, toCheck: String?, supportsOverallProgress: Bool) -> Int? {
+        if supportsOverallProgress {
+            return max(0, min(100, rawPercent))
+        }
+        guard let toCheck else { return nil }
+        let cleaned = toCheck
+            .replacingOccurrences(of: "to-chk=", with: "")
+            .replacingOccurrences(of: "to-check=", with: "")
+            .replacingOccurrences(of: "ir-chk=", with: "")
+        let parts = cleaned.split(separator: "/")
+        guard parts.count == 2,
+              let remaining = Int(parts[0].filter(\.isNumber)),
+              let total = Int(parts[1].filter(\.isNumber)),
+              total > 0 else { return nil }
+        let completed = max(0, min(total, total - remaining))
+        return max(0, min(100, Int((Double(completed) / Double(total) * 100.0).rounded())))
+    }
+
+    func syncRsyncFailureDetails(from output: String, limit: Int = 12) -> [String] {
+        let indicators = [
+            "rsync:", "rsync error", "error", "failed", "denied", "vanished",
+            "no such file", "not permitted", "resource busy", "broken pipe",
+            "input/output", "io error", "cannot", "skipping"
+        ]
+        var seen = Set<String>()
+        var details: [String] = []
+        for rawLine in output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+            let lower = line.lowercased()
+            guard indicators.contains(where: { lower.contains($0) }) else { continue }
+            let compact = line.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            let bounded = String(compact.prefix(900))
+            guard seen.insert(bounded).inserted else { continue }
+            details.append(bounded)
+            if details.count >= limit { break }
+        }
+        return details
+    }
+
     func formatSpeedInMBPerSecond(_ raw: String) -> String {
         let cleaned = raw
             .replacingOccurrences(of: " ", with: "")
@@ -3123,7 +3163,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             guard let translated = translatedSFMRelativePath(root) else { return nil }
             let sourceRule = "H /\(escapedRsyncFilterPath(root))"
             let destinationRule = "P /\(escapedRsyncFilterPath(translated))"
-            return "--filter=\(shellQuote(sourceRule)) --filter=\(shellQuote(destinationRule))"
+            let components = translated.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard let fileName = components.last, !fileName.isEmpty else {
+                return "--filter=\(shellQuote(sourceRule)) --filter=\(shellQuote(destinationRule))"
+            }
+            let parent = components.dropLast().joined(separator: "/")
+            let temporaryName = ".\(escapedRsyncFilterPath(fileName)).??????"
+            let temporaryPath = parent.isEmpty
+                ? temporaryName
+                : "\(escapedRsyncFilterPath(parent))/\(temporaryName)"
+            let temporaryRule = "P /\(temporaryPath)"
+            return "--filter=\(shellQuote(sourceRule)) --filter=\(shellQuote(destinationRule)) --filter=\(shellQuote(temporaryRule))"
         }.joined(separator: " ")
     }
 
@@ -3832,7 +3882,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         DispatchQueue.main.async {
             guard var state = self.syncProgressStates[profileId], state.isRunning else { return }
             if let percent = percent {
-                state.percent = max(0, min(100, percent))
+                // Een totale voortgangsbalk mag niet teruglopen wanneer rsync een
+                // volgende incremental-recursion batch of een volgend bestand start.
+                state.percent = max(state.percent, max(0, min(100, percent)))
             }
             if let speed = speed { state.speed = speed }
             if let eta = eta { state.eta = eta }
@@ -4501,7 +4553,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }
             let metrics = self.rsyncProgressMetrics(from: trimmed)
             if let metrics {
-                self.updateSyncProgress(profileId: profile.id, percent: metrics.percent, speed: metrics.speed, eta: metrics.eta)
+                let overallPercent = self.rsyncOverallProgressPercent(
+                    rawPercent: metrics.percent,
+                    toCheck: metrics.toCheck,
+                    supportsOverallProgress: self.rsyncConfig.supportsInfo
+                )
+                self.updateSyncProgress(profileId: profile.id, percent: overallPercent, speed: metrics.speed, eta: metrics.eta)
             }
             if metrics == nil, let detail = self.syncProgressDetail(fromRsyncLine: trimmed) {
                 self.updateSyncProgress(profileId: profile.id, detail: detail)
@@ -4518,6 +4575,18 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
         let snapshot = countQueue.sync {
             (transferred, deleted, metadataOnly, transferredPaths, timestampRepaired, pendingTimestampPaths, Array(affectedDirectoryPathSet), discoveredSFMPaths)
+        }
+        let rsyncFailureDetails = result.exitCode == 0
+            ? []
+            : syncRsyncFailureDetails(from: result.output)
+        if !rsyncFailureDetails.isEmpty && !syncCancellationRequested(for: profile.id) {
+            for (index, detail) in rsyncFailureDetails.enumerated() {
+                recordTransferLog(
+                    status: "SYNC RSYNC FOUT",
+                    relativePath: profile.name,
+                    detail: "\(index + 1)/\(rsyncFailureDetails.count) | \(detail)"
+                )
+            }
         }
         if !snapshot.7.isEmpty {
             updateSyncSFMCompatibilityState(profileId: profile.id, discoveredPaths: snapshot.7, markScanned: false)
@@ -4618,6 +4687,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else {
             let timeoutText = result.timedOut ? " timeout" : ""
             var status = "Fout: rsync code \(result.exitCode)\(timeoutText)"
+            if let firstFailure = rsyncFailureDetails.first {
+                status += " | \(String(firstFailure.prefix(350)))"
+            }
             if !sfmTransfer.failures.isEmpty { status += " | \(sfmTransfer.failures.count) SMB-naampaden mislukt" }
             if timestampRepair.repaired > 0 { status += " | \(timestampRepair.repaired) wijzigingsdatums alsnog hersteld" }
             if timestampRepair.failed > 0 { status += " | \(timestampRepair.failed) datumreparaties mislukt" }
