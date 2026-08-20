@@ -2876,9 +2876,15 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
     }
 
-    func updateSyncSFMCompatibilityState(profileId: String, discoveredPaths: Set<String>, markScanned: Bool) {
+    func updateSyncSFMCompatibilityState(profileId: String, discoveredPaths: Set<String>, markScanned: Bool, replaceExisting: Bool = false) {
         let encodedState: Data? = syncStateQueue.sync {
-            if !discoveredPaths.isEmpty {
+            if replaceExisting {
+                if discoveredPaths.isEmpty {
+                    syncSFMPathsByProfile.removeValue(forKey: profileId)
+                } else {
+                    syncSFMPathsByProfile[profileId] = discoveredPaths
+                }
+            } else if !discoveredPaths.isEmpty {
                 syncSFMPathsByProfile[profileId, default: []].formUnion(discoveredPaths)
             }
             if markScanned { syncSFMScannedProfileIds.insert(profileId) }
@@ -3108,6 +3114,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     func prepareSyncSFMCompatibility(srcBase: String, profile: SyncProfile) -> SyncSFMPreparationResult {
+        let fm = FileManager.default
         var snapshot = syncSFMCompatibilitySnapshot(profileId: profile.id)
         if !snapshot.scanned {
             log("Sync SMB-naamcontrole gestart: \(profile.name)")
@@ -3124,8 +3131,24 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             log("Sync SMB-naamcontrole klaar: \(profile.name) | \(initialScan.paths.count) SFM-pad(en)")
         }
 
-        let knownRoots = Set(snapshot.paths.compactMap(syncSFMRootPath))
-        var expandedPaths = snapshot.paths
+        let currentPaths = Set(snapshot.paths.filter { relativePath in
+            guard let sourcePath = safeSFMPath(relativePath: relativePath, basePath: srcBase) else { return false }
+            return fm.fileExists(atPath: sourcePath)
+        })
+        let removedPaths = snapshot.paths.subtracting(currentPaths)
+        if !removedPaths.isEmpty {
+            let summary = removedPaths.sorted().prefix(3).joined(separator: ", ")
+            let remaining = removedPaths.count > 3 ? " … (+\(removedPaths.count - 3) meer)" : ""
+            log("Sync SMB-index opgeschoond: \(profile.name) | \(removedPaths.count) verdwenen pad(en) | \(summary)\(remaining)")
+            recordTransferLog(
+                status: "SYNC SMB-INDEX OPGESCHOOND",
+                relativePath: profile.name,
+                detail: "\(removedPaths.count) verdwenen of hernoemde SMB-pad(en) verwijderd"
+            )
+        }
+
+        let knownRoots = Set(currentPaths.compactMap(syncSFMRootPath))
+        var expandedPaths = currentPaths
         for root in knownRoots.sorted() {
             if syncCancellationRequested(for: profile.id) {
                 return SyncSFMPreparationResult(paths: expandedPaths, roots: knownRoots, cancelled: true)
@@ -3141,7 +3164,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             }
         }
         if expandedPaths != snapshot.paths {
-            updateSyncSFMCompatibilityState(profileId: profile.id, discoveredPaths: expandedPaths, markScanned: false)
+            updateSyncSFMCompatibilityState(
+                profileId: profile.id,
+                discoveredPaths: expandedPaths,
+                markScanned: false,
+                replaceExisting: true
+            )
         }
         let roots = Set(expandedPaths.compactMap(syncSFMRootPath))
         return SyncSFMPreparationResult(paths: expandedPaths, roots: roots, cancelled: false)

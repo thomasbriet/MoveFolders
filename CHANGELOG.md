@@ -2,6 +2,22 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.20] - 2026-08-20
+
+### Opgelost
+
+- De opgeslagen SMB/SFM-compatibiliteitsindex groeit niet langer alleen maar door. Vóór iedere sync worden de onthouden speciale paden opnieuw tegen Folder A gecontroleerd.
+- Een speciaal SMB-bestand dat is verwijderd of naar een gewone bestandsnaam is hernoemd, verdwijnt automatisch uit de index en wordt niet meer als `SMB-naam 3/3` in de status verwerkt.
+- Voor speciale SMB-mappen wordt de actuele inhoud opnieuw opgebouwd, zodat ook verdwenen onderliggende bestanden uit de index worden verwijderd.
+
+### Verbeterd
+
+- Een opgeschoonde index wordt één keer als `SYNC SMB-INDEX OPGESCHOOND` in het overdrachtslog vermeld, inclusief het aantal verdwenen of hernoemde paden.
+
+### Getest
+
+- De bestaande Games-index met drie vermeldingen is vergeleken met Folder A. De hernoemde tweede `Blechmann`-vermelding wordt als verouderd gevonden; de twee werkelijk nog bestaande speciale paden blijven behouden.
+
 ## [0.9.19] - 2026-08-20
 
 ### Opgelost
