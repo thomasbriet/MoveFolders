@@ -2,6 +2,33 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.22] - 2026-09-14
+
+### Toegevoegd
+
+- `Move folders` heeft nu een wachtrij. Start je tijdens een lopende overdracht een nieuwe selectie, dan komt die achteraan in de wachtrij en begint automatisch zodra de vorige opdracht klaar is.
+- Nieuwe knop `Wachtrij` opent een overzichtsvenster met alle wachtende opdrachten, inclusief bron, doel, aantal mappen en de gekozen opties.
+- In dat venster kunnen afzonderlijke wachtende opdrachten worden verwijderd of kan de hele wachtrij worden gewist. Een lopende overdracht gaat daarbij gewoon door.
+- De knoptitel, het voortgangsvenster en het menubalkmenu tonen hoeveel opdrachten nog wachten.
+- Toevoegen, starten, verwijderen en wissen van wachtrij-opdrachten wordt vastgelegd in het overdrachtslog.
+- Bij het annuleren van een overdracht met een gevulde wachtrij wordt gevraagd of alleen die overdracht of ook de wachtrij moet stoppen.
+- Afsluiten met wachtende opdrachten vraagt om bevestiging, omdat de wachtrij niet tussen sessies wordt bewaard.
+
+### Opgelost
+
+- Een tweede keer op `Overdracht beginnen` drukken tijdens een lopende overdracht startte voorheen een tweede, parallelle overdracht. Beide opdrachten deelden dezelfde voortgangs-, annuleer- en hervatstatus, waardoor de voortgang door elkaar liep en `Annuleer overdracht` de verkeerde opdracht kon stoppen. Er loopt nu altijd hoogstens één overdracht tegelijk.
+- Een lopende overdracht gebruikt voortaan de opties zoals die golden bij het starten of in de wachtrij zetten. Het aanpassen van `Pre-scan`, `Lege mappen overslaan`, `Bron verwijderen na overdracht` of `Bestandsattributen (xattrs) kopiëren` voor een volgende opdracht verandert een lopende overdracht daardoor niet meer.
+- De knop `Hervat` is tijdens een lopende overdracht niet meer beschikbaar. De bewaarde hervatopdracht verwijst dan naar de items die op dat moment worden verwerkt; hervatten kopieerde die dubbel.
+- De samenvatting na afloop toont de hervatbare items van die specifieke overdracht, ook wanneer de volgende wachtrij-opdracht al is gestart.
+- Een update installeren wordt ook geblokkeerd zolang er opdrachten in de wachtrij staan.
+
+### Getest
+
+- Twintig geautomatiseerde controles tegen de echte overdrachtscode: een selectie die tijdens een lopende overdracht wordt gestart komt in de wachtrij in plaats van een tweede overdracht te starten, de volgorde blijft behouden, iedere opdracht houdt zijn eigen opties vast en de wachtrij start niets zolang er nog een overdracht loopt.
+- Met een echte rsync-overdracht van 25.000 bestanden is gecontroleerd dat een tijdens die overdracht toegevoegde opdracht netjes blijft wachten en dat de volgende opdracht daarna daadwerkelijk zelf begint te kopiëren.
+- Verwijderen uit de wachtrij gebeurt op opdracht-id, zodat het opschuiven van rijen bij een startende opdracht niet de verkeerde opdracht kan wissen.
+- De releasebuild start zonder fouten en `codesign --verify --deep --strict` keurt de app goed.
+
 ## [0.9.21] - 2026-08-20
 
 ### Opgelost

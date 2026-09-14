@@ -122,6 +122,45 @@ class TableAdapter: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 }
 
+class TransferQueueAdapter: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    struct Row {
+        let id: String
+        let position: String
+        let items: String
+        let srcPath: String
+        let dstPath: String
+        let options: String
+    }
+
+    var rows: [Row] = []
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row >= 0 && row < rows.count else { return nil }
+        let item = rows[row]
+        let columnId = tableColumn?.identifier.rawValue ?? ""
+        let id = NSUserInterfaceItemIdentifier("queueCell_\(columnId)")
+        let tf: NSTextField
+        if let existing = tableView.makeView(withIdentifier: id, owner: self) as? NSTextField {
+            tf = existing
+        } else {
+            tf = NSTextField(labelWithString: "")
+            tf.identifier = id
+            tf.lineBreakMode = .byTruncatingMiddle
+        }
+        switch columnId {
+        case "position": tf.stringValue = item.position
+        case "items": tf.stringValue = item.items
+        case "src": tf.stringValue = item.srcPath
+        case "dst": tf.stringValue = item.dstPath
+        case "options": tf.stringValue = item.options
+        default: tf.stringValue = ""
+        }
+        return tf
+    }
+}
+
 enum MismatchKind { case missingDest, timeDiff, sizeDiff, extraDest }
 struct Mismatch { let kind: MismatchKind; let relPath: String }
 
@@ -670,6 +709,18 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var recentDestinationPaths: [String] = []
     var favoritePresets: [FavoriteTransferPreset] = []
     var lastResumeJob: ResumableTransferJob?
+    var pendingTransferQueue: [QueuedTransferRequest] = []
+    var transferInProgress = false
+    // Een lopende overdracht gebruikt de opties van het moment waarop die is gestart of in de wachtrij gezet,
+    // zodat het wijzigen van een checkbox voor een volgende opdracht de lopende overdracht niet verandert.
+    var activeTransferOptions: TransferOptions?
+    var queueWindow: NSWindow?
+    var queueTable: NSTableView?
+    var queueHeaderLabel: NSTextField?
+    var queueRemoveButton: NSButton?
+    var queueClearButton: NSButton?
+    let queueAdapter = TransferQueueAdapter()
+    var queueButton: NSButton!
     var syncProfiles: [SyncProfile] = []
     var syncRunningProfileIds: Set<String> = []
     var syncActiveProcesses: [String: Process] = [:]
@@ -782,6 +833,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let options: TransferOptions
         let reason: String
         let createdAt: Date
+    }
+
+    struct QueuedTransferRequest {
+        let id: String
+        let srcPath: String
+        let dstPath: String
+        let items: [String]
+        let options: TransferOptions
+        let resumed: Bool
+        let queuedAt: Date
     }
 
     struct FavoriteTransferPreset: Codable {
@@ -1100,6 +1161,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         chooseDstButton = makeImageButton(NSImage.folderName, 1060, 554, 28, #selector(chooseDst), mask: [.minXMargin, .minYMargin])
         applySrcButton = makeButton("Gebruik bronpad", 20, 424, 150, 26, #selector(applySrc))
         backSrcButton = makeButton("Terug", 180, 424, 80, 26, #selector(goBackSrc))
+        queueButton = makeButton("Wachtrij", 270, 424, 150, 26, #selector(toggleQueueWindow))
         applyDstButton = makeButton("Gebruik doelpad", 700, 424, 150, 26, #selector(applyDst), mask: [.minXMargin, .minYMargin])
         backDstButton = makeButton("Terug", 860, 424, 80, 26, #selector(goBackDst), mask: [.minXMargin, .minYMargin])
         syncProfilePopup = makePopup(20, 480, 220, #selector(selectSyncProfile), in: syncContent)
@@ -1168,6 +1230,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         refreshSyncProfileMenu()
         refreshVisibleSyncState()
         updateResumeButton()
+        updateQueueUI()
         layoutMainWindow()
         setupStatusItem()
 
@@ -1257,6 +1320,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         refreshLoginItemSettingsUI()
         guard window != nil, window.isMiniaturized else { return }
         restoreMainWindow()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !pendingTransferQueue.isEmpty else { return .terminateNow }
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "Nog \(pendingTransferQueue.count) opdracht(en) in de wachtrij"
+        confirm.informativeText = "Wachtende opdrachten worden niet bewaard en verdwijnen bij het afsluiten. Een lopende overdracht wordt afgebroken."
+        confirm.addButton(withTitle: "Toch afsluiten")
+        confirm.addButton(withTitle: "Annuleer")
+        return confirm.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1469,10 +1543,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     func syncStatusMenuSummary() -> String {
         let state = syncStateQueue.sync { (automaticSyncsPaused, syncRunningProfileIds) }
         let transferActive = progressWindow != nil
+        let queued = pendingTransferQueue.count
+        let queueSuffix = queued > 0 ? " (+\(queued) in wachtrij)" : ""
         if transferActive && !state.1.isEmpty {
-            return "Overdracht en \(state.1.count) sync(s) bezig"
+            return "Overdracht en \(state.1.count) sync(s) bezig\(queueSuffix)"
         }
-        if transferActive { return "Overdracht bezig" }
+        if transferActive { return "Overdracht bezig\(queueSuffix)" }
         if !state.1.isEmpty { return "\(state.1.count) sync(s) bezig" }
         if state.0 { return "Automatische syncs gepauzeerd" }
         let enabled = syncProfiles.filter { $0.enabled }
@@ -1695,6 +1771,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
         applySrcButton.frame = NSRect(x: leftX, y: pathButtonY, width: 150, height: 26)
         backSrcButton.frame = NSRect(x: leftX + 160, y: pathButtonY, width: 80, height: 26)
+        queueButton.frame = NSRect(x: leftX + 250, y: pathButtonY, width: max(120, min(170, columnWidth - 250)), height: 26)
         applyDstButton.frame = NSRect(x: rightX, y: pathButtonY, width: 150, height: 26)
         backDstButton.frame = NSRect(x: rightX + 160, y: pathButtonY, width: 80, height: 26)
         recentDestinationPopup.frame = NSRect(x: rightX + columnWidth - 190, y: pathButtonY, width: 190, height: 26)
@@ -1804,6 +1881,22 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     @objc func toggleXattrs(_ sender: NSButton) { copyXattrsEnabled = sender.state == .on }
     @objc func cancelTransfer() {
         if isTransferCancelRequested() { return }
+        if !pendingTransferQueue.isEmpty {
+            let choice = NSAlert()
+            choice.messageText = "Overdracht annuleren"
+            choice.informativeText = "Er staan nog \(pendingTransferQueue.count) opdracht(en) in de wachtrij. Wat wil je annuleren?"
+            choice.addButton(withTitle: "Alleen deze overdracht")
+            choice.addButton(withTitle: "Deze en de hele wachtrij")
+            choice.addButton(withTitle: "Terug")
+            switch choice.runModal() {
+            case .alertFirstButtonReturn:
+                break
+            case .alertSecondButtonReturn:
+                discardQueuedTransfers(reason: "geannuleerd met de lopende overdracht")
+            default:
+                return
+            }
+        }
         log("Annuleren aangevraagd door gebruiker")
         requestTransferCancellation()
         DispatchQueue.main.async {
@@ -2034,7 +2127,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                             backing: .buffered,
                             defer: false)
         panel.contentMinSize = NSSize(width: 640, height: 240)
-        panel.title = "Overdracht bezig..."
+        panel.title = progressWindowTitle()
         panel.titleVisibility = .visible
         panel.titlebarAppearsTransparent = false
         panel.isMovableByWindowBackground = false
@@ -2832,6 +2925,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             deleteSourceEnabled: deleteSourceEnabled,
             copyXattrsEnabled: copyXattrsEnabled
         )
+    }
+
+    // Opties van de lopende overdracht; buiten een overdracht gelden de actuele schermopties.
+    func effectiveTransferOptions() -> TransferOptions {
+        activeTransferOptions ?? currentTransferOptions()
     }
 
     func applyTransferOptions(_ options: TransferOptions) {
@@ -4828,8 +4926,14 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     func updateResumeButton() {
         guard resumeButton != nil else { return }
         let count = lastResumeJob?.items.count ?? 0
-        resumeButton.isEnabled = count > 0
-        resumeButton.toolTip = count > 0 ? "Hervat \(count) item(s) van de vorige mislukte of geannuleerde overdracht" : "Geen mislukte of geannuleerde overdracht om te hervatten"
+        // Tijdens een lopende overdracht verwijst de bewaarde opdracht naar de items die nu worden
+        // verwerkt; hervatten zou die dubbel kopiëren.
+        resumeButton.isEnabled = count > 0 && !transferInProgress
+        if transferInProgress {
+            resumeButton.toolTip = "Beschikbaar zodra de lopende overdracht klaar is"
+        } else {
+            resumeButton.toolTip = count > 0 ? "Hervat \(count) item(s) van de vorige mislukte of geannuleerde overdracht" : "Geen mislukte of geannuleerde overdracht om te hervatten"
+        }
     }
 
     func setPath(field: NSTextField, newPath: String, history: inout [String], refresh: () -> Void) {
@@ -4850,7 +4954,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     func shouldUseXattrs(forMap mapName: String) -> Bool {
-        guard copyXattrsEnabled else { return false }
+        guard effectiveTransferOptions().copyXattrsEnabled else { return false }
         if xattrsDisabledForJob { return false }
         if xattrsDisabledMaps.contains(mapName) { return false }
         return true
@@ -5895,7 +5999,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 }
             }
             updatePostVerifyUI(detail: "Post-verify: bron \(srcCount), doel \(dstCount), mismatches 0\(extraText)", estimatedPercent: 100)
-            if deleteSourceEnabled == false {
+            if effectiveTransferOptions().deleteSourceEnabled == false {
                 setPhase("Bron behouden")
                 log("Opschonen overgeslagen (bron behouden): \(items.joined(separator: ", "))")
                 return TransferSummary(name: items.joined(separator: ", "), status: .success)
@@ -5946,7 +6050,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             overwriteMismatches(selected, srcBase: srcBase, dstBase: dstBase, mapName: items.first ?? "")
             outcomeStatus = .warning("Mismatchs overschreven")
         }
-        if deleteSourceEnabled == false {
+        if effectiveTransferOptions().deleteSourceEnabled == false {
             setPhase("Bron behouden")
             log("Opschonen overgeslagen na mismatch-afhandeling (bron behouden): \(items.joined(separator: ", "))")
             return TransferSummary(name: items.joined(separator: ", "), status: outcomeStatus)
@@ -6373,10 +6477,14 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             guard i >= 0 && i < srcAdapter.items.count else { return nil }
             return srcAdapter.items[i].name
         }
-        startTransfer(items: items, srcPath: srcPath, dstPath: dstPath, resumed: false)
+        requestTransfer(items: items, srcPath: srcPath, dstPath: dstPath, resumed: false, options: currentTransferOptions())
     }
 
     @objc func resumeLastTransfer() {
+        guard !transferInProgress else {
+            alert("Er loopt al een overdracht. Wacht tot deze klaar is voordat je hervat.")
+            return
+        }
         guard let job = lastResumeJob, !job.items.isEmpty else {
             alert("Er is geen mislukte of geannuleerde overdracht om te hervatten.")
             return
@@ -6388,15 +6496,280 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         alert.addButton(withTitle: "Annuleer")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        resumeTransferJob(job)
+    }
+
+    // Hervat een concrete opdracht: direct wanneer niets loopt, anders achteraan in de wachtrij.
+    func resumeTransferJob(_ job: ResumableTransferJob) {
+        guard !job.items.isEmpty else { return }
+        if transferInProgress {
+            enqueueTransfer(items: job.items, srcPath: job.srcPath, dstPath: job.dstPath, options: job.options, resumed: true)
+            return
+        }
         setSrcPath(job.srcPath, rememberRecent: true)
         setDstPath(job.dstPath, rememberRecent: true)
         applyTransferOptions(job.options)
-        startTransfer(items: job.items, srcPath: job.srcPath, dstPath: job.dstPath, resumed: true)
+        startTransfer(items: job.items, srcPath: job.srcPath, dstPath: job.dstPath, resumed: true, options: job.options)
     }
 
-    func startTransfer(items: [String], srcPath: String, dstPath: String, resumed: Bool) {
+    // Enige ingang voor nieuwe overdrachtsopdrachten: start direct of zet achteraan in de wachtrij.
+    func requestTransfer(items: [String], srcPath: String, dstPath: String, resumed: Bool, options: TransferOptions) {
         guard !items.isEmpty else { return }
-        let optionsAtStart = currentTransferOptions()
+        if transferInProgress {
+            enqueueTransfer(items: items, srcPath: srcPath, dstPath: dstPath, options: options, resumed: resumed)
+            return
+        }
+        startTransfer(items: items, srcPath: srcPath, dstPath: dstPath, resumed: resumed, options: options)
+    }
+
+    func enqueueTransfer(items: [String], srcPath: String, dstPath: String, options: TransferOptions, resumed: Bool) {
+        let request = QueuedTransferRequest(
+            id: UUID().uuidString,
+            srcPath: srcPath,
+            dstPath: dstPath,
+            items: items,
+            options: options,
+            resumed: resumed,
+            queuedAt: Date()
+        )
+        pendingTransferQueue.append(request)
+        rememberRecentSource(srcPath)
+        rememberRecentDestination(dstPath)
+        let position = pendingTransferQueue.count
+        log("In wachtrij gezet (positie \(position)): \(items.joined(separator: ", ")) | bron: \(srcPath) | doel: \(dstPath)")
+        recordTransferLog(
+            status: "IN WACHTRIJ",
+            relativePath: summarizeList(items),
+            detail: "positie \(position) | bronmap: \(srcPath) | doelmap: \(dstPath)"
+        )
+        updateQueueUI()
+    }
+
+    func startNextQueuedTransferIfIdle() {
+        guard !transferInProgress else { return }
+        guard !pendingTransferQueue.isEmpty else {
+            updateQueueUI()
+            return
+        }
+        let next = pendingTransferQueue.removeFirst()
+        updateQueueUI()
+        log("Wachtrij: volgende opdracht starten (\(pendingTransferQueue.count) daarna nog wachtend)")
+        startTransfer(items: next.items, srcPath: next.srcPath, dstPath: next.dstPath, resumed: next.resumed, options: next.options)
+    }
+
+    func queueOptionsSummary(_ options: TransferOptions) -> String {
+        var parts: [String] = []
+        parts.append(options.preScanEnabled ? "pre-scan" : "geen pre-scan")
+        if options.skipEmptyFoldersEnabled { parts.append("lege mappen overslaan") }
+        parts.append(options.deleteSourceEnabled ? "bron verwijderen" : "bron behouden")
+        if options.copyXattrsEnabled { parts.append("xattrs") }
+        return parts.joined(separator: ", ")
+    }
+
+    func progressWindowTitle() -> String {
+        let queued = pendingTransferQueue.count
+        return queued > 0 ? "Overdracht bezig... (+\(queued) in wachtrij)" : "Overdracht bezig..."
+    }
+
+    func updateQueueUI() {
+        progressWindow?.title = progressWindowTitle()
+        guard queueButton != nil else { return }
+        let count = pendingTransferQueue.count
+        queueButton.title = count > 0 ? "Wachtrij (\(count))" : "Wachtrij"
+        queueButton.toolTip = count > 0
+            ? "\(count) opdracht(en) wachten op de lopende overdracht"
+            : "Geen wachtende opdrachten. Selecties die je tijdens een lopende overdracht start, komen hier."
+        refreshQueueWindow()
+        updateStatusItemAppearance()
+    }
+
+    @objc func toggleQueueWindow() {
+        if queueWindow == nil { setupQueueWindow() }
+        guard let panel = queueWindow else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+            return
+        }
+        refreshQueueWindow()
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    func setupQueueWindow() {
+        let frame = NSRect(x: 0, y: 0, width: 900, height: 380)
+        let panel = NSPanel(contentRect: frame,
+                            styleMask: [.titled, .closable, .resizable],
+                            backing: .buffered,
+                            defer: false)
+        panel.title = "Wachtrij overdrachten"
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.contentMinSize = NSSize(width: 640, height: 260)
+        let content = panel.contentView ?? NSView(frame: frame)
+        let margin: CGFloat = 20
+
+        let header = NSTextField(labelWithString: "")
+        header.frame = NSRect(x: margin, y: frame.height - 40, width: frame.width - 2 * margin, height: 20)
+        header.lineBreakMode = .byTruncatingMiddle
+        header.autoresizingMask = [.width, .minYMargin]
+        content.addSubview(header)
+        queueHeaderLabel = header
+
+        let scroll = NSScrollView(frame: NSRect(x: margin, y: 70, width: frame.width - 2 * margin, height: frame.height - 130))
+        scroll.hasVerticalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        let table = NSTableView(frame: scroll.bounds)
+        table.autoresizingMask = [.width, .height]
+        table.usesAlternatingRowBackgroundColors = true
+        table.rowHeight = 22
+        table.allowsColumnReordering = false
+        table.allowsMultipleSelection = true
+        table.allowsEmptySelection = true
+        table.headerView = NSTableHeaderView(frame: NSRect(x: 0, y: 0, width: scroll.bounds.width, height: 24))
+
+        func addColumn(_ identifier: String, _ title: String, _ width: CGFloat) {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        addColumn("position", "#", 30)
+        addColumn("items", "Mappen", 250)
+        addColumn("src", "Bron", 190)
+        addColumn("dst", "Doel", 190)
+        addColumn("options", "Opties", 180)
+
+        table.dataSource = queueAdapter
+        table.delegate = queueAdapter
+        scroll.documentView = table
+        content.addSubview(scroll)
+        queueTable = table
+
+        let removeButton = NSButton(frame: NSRect(x: margin, y: 20, width: 200, height: 28))
+        removeButton.title = "Verwijder geselecteerde"
+        removeButton.bezelStyle = .rounded
+        removeButton.target = self
+        removeButton.action = #selector(removeSelectedQueueItems)
+        removeButton.autoresizingMask = [.maxXMargin, .maxYMargin]
+        content.addSubview(removeButton)
+        queueRemoveButton = removeButton
+
+        let clearButton = NSButton(frame: NSRect(x: margin + 210, y: 20, width: 140, height: 28))
+        clearButton.title = "Wis wachtrij"
+        clearButton.bezelStyle = .rounded
+        clearButton.target = self
+        clearButton.action = #selector(clearTransferQueue)
+        clearButton.autoresizingMask = [.maxXMargin, .maxYMargin]
+        content.addSubview(clearButton)
+        queueClearButton = clearButton
+
+        let closeButton = NSButton(frame: NSRect(x: frame.width - margin - 90, y: 20, width: 90, height: 28))
+        closeButton.title = "Sluit"
+        closeButton.bezelStyle = .rounded
+        closeButton.target = self
+        closeButton.action = #selector(closeQueueWindow)
+        closeButton.autoresizingMask = [.minXMargin, .maxYMargin]
+        content.addSubview(closeButton)
+
+        queueWindow = panel
+        refreshQueueWindow()
+    }
+
+    @objc func closeQueueWindow() {
+        queueWindow?.orderOut(nil)
+    }
+
+    func refreshQueueWindow() {
+        guard let panel = queueWindow else { return }
+        // Bewaar de selectie op opdracht-id: rijnummers schuiven op zodra een opdracht aan de beurt is.
+        let selectedIds = Set((queueTable?.selectedRowIndexes ?? IndexSet())
+            .compactMap { $0 >= 0 && $0 < queueAdapter.rows.count ? queueAdapter.rows[$0].id : nil })
+        queueAdapter.rows = pendingTransferQueue.enumerated().map { index, request in
+            TransferQueueAdapter.Row(
+                id: request.id,
+                position: "\(index + 1)",
+                items: "\(request.items.count)x \(summarizeList(request.items, maxItems: 3))",
+                srcPath: request.srcPath,
+                dstPath: request.dstPath,
+                options: queueOptionsSummary(request.options)
+            )
+        }
+        queueTable?.reloadData()
+        if !selectedIds.isEmpty, let table = queueTable {
+            var restored = IndexSet()
+            for (index, row) in queueAdapter.rows.enumerated() where selectedIds.contains(row.id) {
+                restored.insert(index)
+            }
+            table.selectRowIndexes(restored, byExtendingSelection: false)
+        }
+        let count = pendingTransferQueue.count
+        let running = transferInProgress ? "Bezig met een overdracht" : "Geen overdracht actief"
+        queueHeaderLabel?.stringValue = count > 0
+            ? "\(running). \(count) opdracht(en) in de wachtrij; deze starten automatisch na elkaar."
+            : "\(running). De wachtrij is leeg."
+        queueRemoveButton?.isEnabled = count > 0
+        queueClearButton?.isEnabled = count > 0
+        guard panel.isVisible else { return }
+        panel.displayIfNeeded()
+    }
+
+    @objc func removeSelectedQueueItems() {
+        guard let table = queueTable else { return }
+        // Verwijder op id, zodat een intussen gestarte opdracht de rijnummers niet kan verschuiven.
+        let selectedIds = Set(table.selectedRowIndexes
+            .compactMap { $0 >= 0 && $0 < queueAdapter.rows.count ? queueAdapter.rows[$0].id : nil })
+        let removed = pendingTransferQueue.filter { selectedIds.contains($0.id) }
+        guard !removed.isEmpty else {
+            alert("Selecteer eerst één of meer wachtende opdrachten.")
+            return
+        }
+        pendingTransferQueue.removeAll { selectedIds.contains($0.id) }
+        for request in removed {
+            log("Uit wachtrij verwijderd: \(request.items.joined(separator: ", ")) | bron: \(request.srcPath) | doel: \(request.dstPath)")
+            recordTransferLog(
+                status: "WACHTRIJ VERWIJDERD",
+                relativePath: summarizeList(request.items),
+                detail: "bronmap: \(request.srcPath) | doelmap: \(request.dstPath)"
+            )
+        }
+        updateQueueUI()
+    }
+
+    @objc func clearTransferQueue() {
+        let count = pendingTransferQueue.count
+        guard count > 0 else { return }
+        let confirm = NSAlert()
+        confirm.messageText = "Hele wachtrij wissen?"
+        confirm.informativeText = "\(count) wachtende opdracht(en) worden niet uitgevoerd. Een lopende overdracht gaat gewoon door."
+        confirm.addButton(withTitle: "Wis wachtrij")
+        confirm.addButton(withTitle: "Annuleer")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        discardQueuedTransfers(reason: "handmatig gewist")
+    }
+
+    func discardQueuedTransfers(reason: String) {
+        let removed = pendingTransferQueue
+        guard !removed.isEmpty else { return }
+        pendingTransferQueue.removeAll()
+        for request in removed {
+            log("Uit wachtrij verwijderd (\(reason)): \(request.items.joined(separator: ", ")) | bron: \(request.srcPath) | doel: \(request.dstPath)")
+        }
+        recordTransferLog(status: "WACHTRIJ GEWIST", relativePath: "\(removed.count) opdracht(en)", detail: reason)
+        updateQueueUI()
+    }
+
+    func startTransfer(items: [String], srcPath: String, dstPath: String, resumed: Bool, options: TransferOptions) {
+        guard !items.isEmpty else { return }
+        // Vangnet: nooit twee overdrachten tegelijk laten lopen, ook niet bij een onverwachte aanroep.
+        guard !transferInProgress else {
+            enqueueTransfer(items: items, srcPath: srcPath, dstPath: dstPath, options: options, resumed: resumed)
+            return
+        }
+        transferInProgress = true
+        activeTransferOptions = options
+        updateResumeButton()
+        updateQueueUI()
+        let optionsAtStart = options
         let resumeCreatedAt = Date()
         let activeResumeReason = resumed ? "Hervatte overdracht actief" : "Overdracht actief"
         func remainingItems(from index: Int) -> [String] {
@@ -6425,8 +6798,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         persistResumeSnapshot(items, reason: activeResumeReason, logChange: true)
         let summary = items.prefix(3).joined(separator: ", ") + (items.count > 3 ? " … (+\(items.count - 3) meer)" : "")
         log("\(resumed ? "Hervat copy" : "Start copy"): \(items.joined(separator: ", "))")
-        log("Instelling lege mappen overslaan: \(skipEmptyFoldersEnabled ? "aan" : "uit")")
-        log("Instelling xattrs: \(copyXattrsEnabled ? "aan" : "uit")")
+        log("Instelling lege mappen overslaan: \(optionsAtStart.skipEmptyFoldersEnabled ? "aan" : "uit")")
+        log("Instelling xattrs: \(optionsAtStart.copyXattrsEnabled ? "aan" : "uit")")
         recordTransferLog(
             status: resumed ? "OPDRACHT HERVAT" : "OPDRACHT GESTART",
             relativePath: summary,
@@ -6446,7 +6819,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             var resumeItems: [String] = []
             var resumeReason = ""
             var preScannedFileCounts: [String: Int] = [:]
-            if self.preScanEnabled {
+            if optionsAtStart.preScanEnabled {
                 var totalAll = 0
                 for (idx, name) in items.enumerated() {
                     if self.isTransferCancelRequested() {
@@ -6490,7 +6863,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 }
                 // Controleer lege bronmappen voordat de doelmap wordt beoordeeld.
                 DispatchQueue.main.async { self.setPhase("Controle bron \(idx + 1)/\(items.count): \(name)") }
-                if self.skipEmptyFoldersEnabled && self.sourceItemIsDirectory(name, base: srcPath) {
+                if optionsAtStart.skipEmptyFoldersEnabled && self.sourceItemIsDirectory(name, base: srcPath) {
                     let hasFiles: Bool
                     if let preScannedCount = preScannedFileCounts[name] {
                         hasFiles = preScannedCount > 0
@@ -6549,7 +6922,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                     self.log("Doelmap bestaat al, automatisch doorgaan: \(dstItem)")
                 }
 
-                if self.preScanEnabled {
+                if optionsAtStart.preScanEnabled {
                     let total = preScannedFileCounts[name] ?? 0
                     self.log("Pre-scan count \(name): \(total) bestanden")
                     DispatchQueue.main.async {
@@ -6643,6 +7016,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 detail: "OK: \(okCount) | waarschuwingen: \(warningCount) | fouten: \(failedCount)"
             )
             DispatchQueue.main.async {
+                var finishedResumeJob: ResumableTransferJob?
                 if uniqueResumeItems.isEmpty {
                     self.storeResumeJob(nil)
                 } else {
@@ -6655,9 +7029,17 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                         createdAt: Date()
                     )
                     self.storeResumeJob(job)
+                    finishedResumeJob = job
                 }
                 self.hideProgress()
-                self.showSummary(summaries, dstPath: dstPath)
+                self.transferInProgress = false
+                self.activeTransferOptions = nil
+                self.updateResumeButton()
+                // De volgende wachtrij-opdracht start vóór de samenvatting, zodat een openstaande
+                // samenvatting de wachtrij niet ophoudt.
+                let hasQueuedWork = !self.pendingTransferQueue.isEmpty
+                self.startNextQueuedTransferIfIdle()
+                self.showSummary(summaries, dstPath: dstPath, resumeJob: finishedResumeJob, asSheet: hasQueuedWork)
             }
         }
     }
@@ -6678,7 +7060,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return shown
     }
 
-    func showSummary(_ summaries: [TransferSummary], dstPath: String? = nil) {
+    func showSummary(_ summaries: [TransferSummary], dstPath: String? = nil, resumeJob: ResumableTransferJob? = nil, asSheet: Bool = false) {
         guard !summaries.isEmpty else { return }
         var ok: [String] = []
         var warn: [String] = []
@@ -6701,9 +7083,14 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         lines.append("Waarschuwingen: \(summarizeList(warn))")
         lines.append("Fouten: \(summarizeList(fail))")
 
-        if let job = lastResumeJob, !job.items.isEmpty {
+        let resumable = resumeJob.flatMap { $0.items.isEmpty ? nil : $0 }
+        if let job = resumable {
             lines.append("")
             lines.append("Hervatbaar: \(summarizeList(job.items))")
+        }
+        if !pendingTransferQueue.isEmpty {
+            lines.append("")
+            lines.append("Nog in de wachtrij: \(pendingTransferQueue.count) opdracht(en)")
         }
 
         let alert = NSAlert()
@@ -6711,7 +7098,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         alert.informativeText = lines.dropFirst().joined(separator: "\n")
 
         var actions: [String] = []
-        if let job = lastResumeJob, !job.items.isEmpty {
+        if resumable != nil {
             alert.addButton(withTitle: "Hervat")
             actions.append("resume")
         }
@@ -6724,22 +7111,29 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         alert.addButton(withTitle: "Sluit")
         actions.append("close")
 
-        let response = alert.runModal()
-        let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-        let selectedIndex = response.rawValue - first
-        guard selectedIndex >= 0 && selectedIndex < actions.count else { return }
-        switch actions[selectedIndex] {
-        case "resume":
-            resumeLastTransfer()
-        case "openDestination":
-            if let dstPath = dstPath {
-                NSWorkspace.shared.open(URL(fileURLWithPath: dstPath))
+        func handle(_ response: NSApplication.ModalResponse) {
+            let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            let selectedIndex = response.rawValue - first
+            guard selectedIndex >= 0 && selectedIndex < actions.count else { return }
+            switch actions[selectedIndex] {
+            case "resume":
+                if let job = resumable { resumeTransferJob(job) }
+            case "openDestination":
+                if let dstPath = dstPath {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: dstPath))
+                }
+            case "showLog":
+                showTransferLogWindow()
+            default:
+                break
             }
-        case "showLog":
-            showTransferLogWindow()
-        default:
-            break
         }
+
+        if asSheet, let parent = window, parent.isVisible {
+            alert.beginSheetModal(for: parent) { response in handle(response) }
+            return
+        }
+        handle(alert.runModal())
     }
 
     func setupTransferLogWindow() {
@@ -7079,8 +7473,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     }
 
     func downloadAndOpenUpdate(packageURL: URL, latestVersion: String) {
-        guard progressWindow == nil else {
+        guard progressWindow == nil, !transferInProgress else {
             alert("Wacht tot de lopende overdracht klaar is voordat je een update installeert.")
+            return
+        }
+        guard pendingTransferQueue.isEmpty else {
+            alert("Er staan nog \(pendingTransferQueue.count) opdracht(en) in de wachtrij. Voer deze eerst uit of wis de wachtrij voordat je een update installeert.")
             return
         }
         let runningIds = syncStateQueue.sync { syncRunningProfileIds }

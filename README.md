@@ -6,19 +6,21 @@ De releasebuild is voor Apple silicon en vereist macOS 11 of nieuwer. Automatisc
 
 De app onthoudt de 5 laatst gebruikte bron- en doelpaden, ondersteunt favorieten voor bron/doel/opties, kan mislukte of geannuleerde overdrachten hervatten, en ondersteunt meerdere eenrichtings-syncprofielen zolang de app draait. Het syncvoortgangsscherm volgt automatisch een actief profiel wanneer het geselecteerde profiel niet draait, terwijl de profielvelden op de handmatige selectie blijven staan. De getoonde actieve sync kan afzonderlijk worden gestopt zonder andere profielen te onderbreken. Tijdens sync wordt de wijzigingsdatum direct na ieder volledig overgezet bestand expliciet hersteld en gecontroleerd. Daardoor slaat een volgende run reeds afgeronde bestanden over, ook wanneer de vorige sync tussentijds op bijvoorbeeld 80% is gestopt. Na een volledig afgeronde overdracht worden ook de wijzigingsdatums van alle geraakte mappen van de diepste map naar boven hersteld. Sync-profielen proberen ontbrekende netwerkschijven stil opnieuw te verbinden met oplopende wachttijden van 1, 5, 15, 30 en 60 minuten en gaan automatisch verder zodra de mappen weer beschikbaar zijn. Zowel sync- als koppelfoutentellers worden bij een herstart van de app gereset; een succesvolle sync of koppeling reset de betreffende teller eveneens. De stille koppeling toont geen Finder- of inlogvenster en gebruikt reeds beschikbare macOS-Sleutelhangergegevens. Bestandsnamen met accenten worden bij sync naar netwerkschijven genormaliseerd. SFM-naamvarianten die verschillende SMB-servers anders tonen, zoals `` en `>`, worden apart herkend en beschermd zodat hetzelfde bestand niet telkens wordt verwijderd en opnieuw overgezet. Tijdelijke InDesign-lockbestanden (`.idlk`) worden bij sync overgeslagen en op het doel beschermd tegen `--delete`, zodat een geopend document geen rsync-code 23 veroorzaakt. Unix-eigenaar en -groep worden bij SMB-syncs niet gekopieerd, omdat deze waarden per Mac en server kunnen verschillen en anders terugkerende metadatameldingen veroorzaken. De uitvoer van langdurige rsync-opdrachten wordt thread-safe en begrensd verwerkt, zodat afsluiten van een commando niet met de live lezer botst en de geheugengroei beperkt blijft. Via `Instellingen…` kan MoveFolders bij het inloggen starten en verborgen in de menubalk blijven draaien. Het menubalkmenu biedt status, handmatige sync, pauzeren/hervatten en toegang tot het log. Lege geselecteerde bronmappen kunnen standaard automatisch worden overgeslagen. Een persistent overdrachtslog registreert per bestand of het wel of niet is overgezet en is via de knop `Log` te openen.
 
+In `Move folders` loopt er altijd hoogstens één overdracht tegelijk. Start je tijdens een lopende overdracht een nieuwe selectie, dan komt die achteraan in een wachtrij en begint automatisch zodra de vorige klaar is. De knop `Wachtrij` toont alle wachtende opdrachten met bron, doel, aantal mappen en de opties waarmee ze zijn klaargezet; afzonderlijke opdrachten kunnen daar worden verwijderd of de hele wachtrij kan worden gewist. Iedere opdracht gebruikt de opties zoals die golden op het moment van starten of in de wachtrij zetten, zodat het instellen van een volgende opdracht een lopende overdracht niet verandert. De wachtrij bestaat alleen zolang de app draait; bij afsluiten met wachtende opdrachten volgt een bevestiging.
+
 Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.9.21
+./scripts/build_release.sh 0.9.22
 ```
 
 Dit maakt lokaal:
 
 - `MoveFolders.app`
-- `MoveFolders_v0.9.21_share.zip`
-- `MoveFolders_v0.9.21_installer.pkg`
+- `MoveFolders_v0.9.22_share.zip`
+- `MoveFolders_v0.9.22_installer.pkg`
 
 ## Updates
 
