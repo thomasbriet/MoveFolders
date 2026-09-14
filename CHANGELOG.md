@@ -2,6 +2,30 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.27] - 2026-09-14
+
+### Toegevoegd
+
+- De wachtrij blijft bewaard tussen sessies. Wachtende opdrachten overleven nu een herstart, crash of geforceerd afsluiten, inclusief bron, doel, mappen en de opties waarmee ze zijn klaargezet.
+- Bij het opstarten vraagt MoveFolders wat er met een bewaarde wachtrij moet gebeuren: `Start wachtrij`, `Laat staan` of `Wis wachtrij`. De wachtrij start nooit uit zichzelf, zodat je na een onverwachte herstart eerst kunt kijken voordat er mappen worden verplaatst of bronnen verwijderd.
+- Het wachtrijvenster heeft een knop `Start wachtrij`, zodat een wachtende reeks ook later handmatig kan worden gestart.
+- Opdrachten waarvan de bronmap intussen is verdwenen, vervallen automatisch bij het herstellen van de wachtrij en worden in het log vermeld.
+
+### Opgelost
+
+- Een wachtrij-opdracht start niet meer wanneer de bron- of doelmap niet beschikbaar is, bijvoorbeeld na het loskoppelen van een netwerkschijf of externe schijf. Voorheen kon het doelpad dan als gewone map op de opstartschijf worden aangemaakt.
+- Zo'n geblokkeerde opdracht blijft klaarstaan in plaats van te mislukken. De reden staat in het wachtrijvenster, in de samenvatting en als `WACHTRIJ WACHT` in het overdrachtslog.
+- De melding daarover onderbreekt een lopende reeks niet; alleen bij een handmatige start verschijnt er een venster.
+
+### Gewijzigd
+
+- De bevestiging bij afsluiten meldt niet langer dat de wachtrij verloren gaat, maar dat die wordt bewaard en bij de volgende start opnieuw wordt aangeboden.
+
+### Getest
+
+- Negen controles met twee sessies achter elkaar: de wachtrij komt na een herstart terug met de juiste volgorde, paden en opties, en een gewiste wachtrij blijft ook na herstart leeg.
+- Een opdracht waarvan de bronmap is verwijderd vervalt bij het herstellen; een opdracht met een niet-gekoppeld doelvolume wordt niet gestart en blijft klaarstaan, waarbij is gecontroleerd dat er geen map op de opstartschijf wordt aangemaakt.
+
 ## [0.9.26] - 2026-09-14
 
 ### Toegevoegd

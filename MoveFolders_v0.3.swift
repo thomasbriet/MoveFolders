@@ -723,6 +723,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var queueWindow: NSWindow?
     var queueTable: NSTableView?
     var queueHeaderLabel: NSTextField?
+    var queueBlockedReason: String?
+    var queueStartButton: NSButton?
     var queueRemoveButton: NSButton?
     var queueClearButton: NSButton?
     let queueAdapter = TransferQueueAdapter()
@@ -749,6 +751,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     let recentDestinationDefaultsKey = "recentDestinationPaths"
     let favoritePresetsDefaultsKey = "favoriteTransferPresets"
     let resumeJobDefaultsKey = "lastResumeJob"
+    let pendingQueueDefaultsKey = "pendingTransferQueue"
     let syncProfilesDefaultsKey = "syncProfiles"
     let syncSFMCompatibilityDefaultsKey = "syncSFMCompatibility"
     let automaticSyncsPausedDefaultsKey = "automaticSyncsPaused"
@@ -851,7 +854,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let reason: String
     }
 
-    struct QueuedTransferRequest {
+    struct QueuedTransferRequest: Codable {
         let id: String
         let srcPath: String
         let dstPath: String
@@ -1112,6 +1115,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         recentDestinationPaths = loadRecentDestinationPaths()
         favoritePresets = loadFavoritePresets()
         lastResumeJob = loadResumeJob()
+        pendingTransferQueue = loadPendingTransferQueue()
         syncProfiles = loadSyncProfiles()
         loadSyncSFMCompatibilityState()
         let resetSyncFailureProfileCount = resetSyncFailureCountersForNewSession()
@@ -1266,6 +1270,9 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             self.schedulePendingDeleteCleanup(basePath: self.srcField.stringValue)
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            self.offerToResumeStoredQueue()
+        }
         startSyncScheduler()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             self.performUpdateCheck(isAutomatic: true)
@@ -1343,7 +1350,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let confirm = NSAlert()
         confirm.alertStyle = .warning
         confirm.messageText = "Nog \(pendingTransferQueue.count) opdracht(en) in de wachtrij"
-        confirm.informativeText = "Wachtende opdrachten worden niet bewaard en verdwijnen bij het afsluiten. Een lopende overdracht wordt afgebroken."
+        confirm.informativeText = "De wachtrij wordt bewaard en bij de volgende start opnieuw aangeboden. Een lopende overdracht wordt wel afgebroken; die kun je daarna hervatten."
         confirm.addButton(withTitle: "Toch afsluiten")
         confirm.addButton(withTitle: "Annuleer")
         return confirm.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
@@ -6681,13 +6688,71 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         updateQueueUI()
     }
 
-    func startNextQueuedTransferIfIdle() {
+    // Wachtrij uit de vorige sessie: nooit uit zichzelf starten, altijd eerst vragen.
+    func offerToResumeStoredQueue() {
+        guard !pendingTransferQueue.isEmpty, !transferInProgress else { return }
+        guard let window, window.isVisible else {
+            log("Wachtrij uit vorige sessie (\(pendingTransferQueue.count)) wacht; hoofdvenster is verborgen")
+            return
+        }
+
+        let count = pendingTransferQueue.count
+        let overview = pendingTransferQueue.prefix(5).map { request in
+            "• \(summarizeList(request.items, maxItems: 3)) → \(request.dstPath)"
+        }.joined(separator: "\n")
+        let remaining = count > 5 ? "\n• … (+\(count - 5) meer)" : ""
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Wachtrij van de vorige sessie"
+        alert.informativeText = "Er staan nog \(count) opdracht(en) klaar die niet meer zijn uitgevoerd.\n\n\(overview)\(remaining)"
+        alert.addButton(withTitle: "Start wachtrij")
+        alert.addButton(withTitle: "Laat staan")
+        alert.addButton(withTitle: "Wis wachtrij")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            log("Wachtrij uit vorige sessie hervat door gebruiker: \(count) opdracht(en)")
+            startNextQueuedTransferIfIdle(notifyUser: true)
+        case .alertSecondButtonReturn:
+            log("Wachtrij uit vorige sessie blijft wachten: \(count) opdracht(en)")
+        default:
+            discardQueuedTransfers(reason: "niet hervat na herstart")
+        }
+    }
+
+    func startNextQueuedTransferIfIdle(notifyUser: Bool = false) {
         guard !transferInProgress else { return }
         guard !pendingTransferQueue.isEmpty else {
+            queueBlockedReason = nil
             updateQueueUI()
             return
         }
-        let next = pendingTransferQueue.removeFirst()
+        // Een doelmap op een losgekoppeld volume zou anders als gewone map op de opstartschijf
+        // worden aangemaakt; de opdracht blijft dan wachten tot het volume er weer is.
+        let next = pendingTransferQueue[0]
+        let fileManager = FileManager.default
+        var unavailable: [String] = []
+        if !fileManager.fileExists(atPath: next.srcPath) { unavailable.append("bron \(next.srcPath)") }
+        if !fileManager.fileExists(atPath: next.dstPath) { unavailable.append("doel \(next.dstPath)") }
+        guard unavailable.isEmpty else {
+            let detail = unavailable.joined(separator: " en ")
+            queueBlockedReason = "\(detail) niet beschikbaar"
+            log("Wachtrij wacht: \(detail) niet beschikbaar voor \(summarizeList(next.items))")
+            recordTransferLog(
+                status: "WACHTRIJ WACHT",
+                relativePath: summarizeList(next.items),
+                detail: "\(detail) niet beschikbaar"
+            )
+            updateQueueUI()
+            // Alleen bij een directe handeling van de gebruiker een venster; anders zou de wachtrij
+            // opnieuw worden onderbroken door een melding.
+            if notifyUser {
+                alert("De volgende wachtrij-opdracht kan nog niet starten.\n\nNiet beschikbaar: \(detail)\n\nKoppel het volume en start de wachtrij daarna opnieuw.")
+            }
+            return
+        }
+        queueBlockedReason = nil
+        pendingTransferQueue.removeFirst()
         updateQueueUI()
         log("Wachtrij: volgende opdracht starten (\(pendingTransferQueue.count) daarna nog wachtend)")
         startTransfer(items: next.items, srcPath: next.srcPath, dstPath: next.dstPath, resumed: next.resumed, options: next.options)
@@ -6707,7 +6772,50 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return queued > 0 ? "Overdracht bezig... (+\(queued) in wachtrij)" : "Overdracht bezig..."
     }
 
+    func savePendingTransferQueue() {
+        resumeStateQueue.sync {
+            if pendingTransferQueue.isEmpty {
+                recentSourceDefaults.removeObject(forKey: pendingQueueDefaultsKey)
+            } else if let data = try? JSONEncoder().encode(pendingTransferQueue) {
+                recentSourceDefaults.set(data, forKey: pendingQueueDefaultsKey)
+            }
+            recentSourceDefaults.synchronize()
+        }
+    }
+
+    // Opdrachten waarvan de bronmap intussen is verdwenen, vervallen bij het opstarten.
+    func loadPendingTransferQueue() -> [QueuedTransferRequest] {
+        guard let data = recentSourceDefaults.data(forKey: pendingQueueDefaultsKey),
+              let stored = try? JSONDecoder().decode([QueuedTransferRequest].self, from: data) else { return [] }
+        let fileManager = FileManager.default
+        var restored: [QueuedTransferRequest] = []
+        var droppedItems = 0
+        for request in stored {
+            let available = request.items.filter {
+                fileManager.fileExists(atPath: (request.srcPath as NSString).appendingPathComponent($0))
+            }
+            droppedItems += request.items.count - available.count
+            guard !available.isEmpty else { continue }
+            restored.append(
+                QueuedTransferRequest(
+                    id: request.id,
+                    srcPath: request.srcPath,
+                    dstPath: request.dstPath,
+                    items: available,
+                    options: request.options,
+                    resumed: request.resumed,
+                    queuedAt: request.queuedAt
+                )
+            )
+        }
+        if droppedItems > 0 {
+            log("Wachtrij hersteld: \(droppedItems) item(s) vervallen omdat de bronmap niet meer bestaat")
+        }
+        return restored
+    }
+
     func updateQueueUI() {
+        savePendingTransferQueue()
         progressWindow?.title = progressWindowTitle()
         guard queueButton != nil else { return }
         let count = pendingTransferQueue.count
@@ -6781,7 +6889,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         content.addSubview(scroll)
         queueTable = table
 
-        let removeButton = NSButton(frame: NSRect(x: margin, y: 20, width: 200, height: 28))
+        let startButton = NSButton(frame: NSRect(x: margin, y: 20, width: 140, height: 28))
+        startButton.title = "Start wachtrij"
+        startButton.bezelStyle = .rounded
+        startButton.target = self
+        startButton.action = #selector(startQueueFromWindow)
+        startButton.autoresizingMask = [.maxXMargin, .maxYMargin]
+        content.addSubview(startButton)
+        queueStartButton = startButton
+
+        let removeButton = NSButton(frame: NSRect(x: margin + 150, y: 20, width: 200, height: 28))
         removeButton.title = "Verwijder geselecteerde"
         removeButton.bezelStyle = .rounded
         removeButton.target = self
@@ -6790,7 +6907,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         content.addSubview(removeButton)
         queueRemoveButton = removeButton
 
-        let clearButton = NSButton(frame: NSRect(x: margin + 210, y: 20, width: 140, height: 28))
+        let clearButton = NSButton(frame: NSRect(x: margin + 360, y: 20, width: 140, height: 28))
         clearButton.title = "Wis wachtrij"
         clearButton.bezelStyle = .rounded
         clearButton.target = self
@@ -6809,6 +6926,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
         queueWindow = panel
         refreshQueueWindow()
+    }
+
+    @objc func startQueueFromWindow() {
+        guard !transferInProgress else {
+            alert("Er loopt al een overdracht. De wachtrij gaat daarna vanzelf verder.")
+            return
+        }
+        guard !pendingTransferQueue.isEmpty else { return }
+        log("Wachtrij handmatig gestart vanuit het wachtrijvenster")
+        startNextQueuedTransferIfIdle(notifyUser: true)
     }
 
     @objc func closeQueueWindow() {
@@ -6840,11 +6967,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
         let count = pendingTransferQueue.count
         let running = transferInProgress ? "Bezig met een overdracht" : "Geen overdracht actief"
-        queueHeaderLabel?.stringValue = count > 0
-            ? "\(running). \(count) opdracht(en) in de wachtrij; deze starten automatisch na elkaar."
-            : "\(running). De wachtrij is leeg."
+        if let blocked = queueBlockedReason, count > 0 {
+            queueHeaderLabel?.stringValue = "Wachtrij wacht: \(blocked). \(count) opdracht(en) klaar; start opnieuw zodra het volume er weer is."
+        } else {
+            queueHeaderLabel?.stringValue = count > 0
+                ? "\(running). \(count) opdracht(en) in de wachtrij; deze starten automatisch na elkaar."
+                : "\(running). De wachtrij is leeg."
+        }
         queueRemoveButton?.isEnabled = count > 0
         queueClearButton?.isEnabled = count > 0
+        queueStartButton?.isEnabled = count > 0 && !transferInProgress
         guard panel.isVisible else { return }
         panel.displayIfNeeded()
     }
@@ -7242,6 +7374,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
 
         let cleanups = currentPendingSourceCleanups()
+        if let blocked = queueBlockedReason, !pendingTransferQueue.isEmpty {
+            lines.append("")
+            lines.append("Wachtrij wacht: \(blocked) — \(pendingTransferQueue.count) opdracht(en) blijven klaarstaan.")
+        }
         if !cleanups.isEmpty {
             let folderCount = cleanups.reduce(0) { $0 + $1.readOnlyDirectories.count }
             lines.append("")
