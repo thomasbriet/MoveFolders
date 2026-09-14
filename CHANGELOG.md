@@ -2,6 +2,21 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.25] - 2026-09-14
+
+### Opgelost
+
+- Een overdracht wordt niet meer afgebroken doordat de Mac in sluimerstand heeft gestaan. De bewaking op stilstaande rsync-uitvoer gebruikt nu een teller die tijdens slaap stilstaat, in plaats van de gewone klok. Voorheen leek een slaapperiode van meer dan dertig minuten op een vastgelopen overdracht en werd rsync na het ontwaken gestopt met `received SIGINT, SIGTERM, or SIGHUP (code 20)`.
+- Waarschuwingen van rsync worden niet langer als bestandspad gelezen. Een regel als `cannot delete non-empty directory: ALT01_Alta` werd door het woord `cannot` aangezien voor een rsync-statuscode, waarna `delete non-empty directory: ALT01_Alta` als overgezette map in het log kwam en als map waarvan de datum moest worden hersteld.
+- Zo'n spookmap liet het datumherstel mislukken en zette een verder geslaagde sync op `SYNC MISLUKT`. Daardoor liep de foutenteller op en schakelde het profiel onnodig terug naar een langere wachttijd.
+- Het voortgangsvenster toont achter `Bestand:` geen rsync-fout- of waarschuwingsregels meer, maar alleen echte bestandsnamen. Die meldingen blijven wel gewoon in het log staan.
+
+### Getest
+
+- De itemize-uitvoer van beide rsync-versies op deze Mac is gemeten en meegenomen: Homebrew 3.4.1 gebruikt codes van twaalf tekens, de ingebouwde macOS-rsync negen. Beide worden nog steeds correct als overdracht herkend.
+- Zeventien controles op de echte regels uit het overdrachtslog: alle gemelde fout- en waarschuwingsregels leveren geen pad en geen bestandsnaam meer op, terwijl gewone overdrachten en mapaanmaak ongewijzigd worden herkend.
+- De slaapbestendige teller loopt monotoon en gelijk met de verstreken tijd.
+
 ## [0.9.24] - 2026-09-14
 
 ### Gewijzigd

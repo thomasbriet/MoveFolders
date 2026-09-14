@@ -4113,6 +4113,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             "file list size"
         ]
         if skipPrefixes.contains(where: { candidate.hasPrefix($0) }) { return nil }
+        if rsyncMessageLine(candidate) { return nil }
         if candidate.range(of: #"^[0-9.,]+\s*[KMGTPE]?B\s+[0-9]+%"#, options: [.regularExpression, .caseInsensitive]) != nil {
             return nil
         }
@@ -4128,14 +4129,30 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return candidate.isEmpty ? nil : candidate
     }
 
+    // rsync schrijft waarschuwingen en fouten op dezelfde stroom als bestandsnamen.
+    // Zulke regels zijn geen paden; "cannot delete non-empty directory: X" leverde anders
+    // een spookmap op die daarna niet te vinden was.
+    func rsyncMessageLine(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        let messagePrefixes = [
+            "rsync:", "rsync error", "rsync warning", "cannot ", "skipping ",
+            "io error", "file has vanished", "some files vanished", "@error"
+        ]
+        return messagePrefixes.contains { lower.hasPrefix($0) }
+    }
+
     func syncItemizedEntry(from line: String) -> (code: String, path: String)? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rsyncMessageLine(trimmed) else { return nil }
         let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
         guard parts.count == 2 else { return nil }
         let code = String(parts[0])
         let codeCharacters = Array(code)
-        guard codeCharacters.count >= 2,
-              codeCharacters[0] == ">" || codeCharacters[0] == "<" || codeCharacters[0] == "c" || codeCharacters[0] == "h" || codeCharacters[0] == "." else { return nil }
+        // Een itemize-code van rsync is richting + bestandstype + vlaggen; de breedte verschilt
+        // per rsync-versie (macOS 2.6.9 gebruikt er negen, Homebrew 3.4 twaalf).
+        guard codeCharacters.count >= 9, codeCharacters.count <= 14,
+              codeCharacters[0] == ">" || codeCharacters[0] == "<" || codeCharacters[0] == "c" || codeCharacters[0] == "h" || codeCharacters[0] == ".",
+              "fdLDS".contains(codeCharacters[1]) else { return nil }
         var path = String(parts[1]).trimmingCharacters(in: .whitespaces)
         if path == "./" { path = "." }
         else if path.hasPrefix("./") { path.removeFirst(2) }
@@ -5007,6 +5024,12 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             transferCancelRequested = false
             activeTransferProcess = nil
         }
+    }
+
+    // Teller die stilstaat terwijl de Mac slaapt. Met de gewone klok telde sluimerstand mee als
+    // inactiviteit van rsync, waardoor een overdracht na het ontwaken werd afgebroken.
+    func activeUptimeSeconds() -> TimeInterval {
+        Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) / 1_000_000_000
     }
 
     func isTransferCancelRequested() -> Bool {
@@ -6103,13 +6126,13 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let streamOutput = StreamingProcessOutput(captureLimit: streamingOutputCaptureLimit)
         let sem = DispatchSemaphore(value: 0)
         let lastOutputQueue = DispatchQueue(label: "MoveFolders.runCommandStreaming.lastOutput")
-        var lastOutput = Date()
+        var lastOutput = self.activeUptimeSeconds()
         let timeoutQueue = DispatchQueue(label: "MoveFolders.runCommandStreaming.timeout")
         var didTimeout = false
         let heartbeatTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         heartbeatTimer.schedule(deadline: .now() + 5, repeating: 5)
         heartbeatTimer.setEventHandler {
-            let since = lastOutputQueue.sync { Date().timeIntervalSince(lastOutput) }
+            let since = lastOutputQueue.sync { self.activeUptimeSeconds() - lastOutput }
             if since >= 5 {
                 self.log("Command running, no output for \(Int(since))s")
             }
@@ -6141,7 +6164,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         pipe.fileHandleForReading.readabilityHandler = { handle in
             streamOutput.readAvailable(
                 from: handle,
-                onData: { lastOutputQueue.sync { lastOutput = Date() } },
+                onData: { lastOutputQueue.sync { lastOutput = self.activeUptimeSeconds() } },
                 onRecord: onLine
             )
         }
@@ -6276,13 +6299,13 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             let streamOutput = StreamingProcessOutput(captureLimit: streamingOutputCaptureLimit)
             let sem = DispatchSemaphore(value: 0)
             let lastOutputQueue = DispatchQueue(label: "MoveFolders.copy.lastOutput")
-            var lastOutput = Date()
+            var lastOutput = self.activeUptimeSeconds()
             let timeoutQueue = DispatchQueue(label: "MoveFolders.copy.timeout")
             var didTimeout = false
             let heartbeatTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
             heartbeatTimer.schedule(deadline: .now() + 5, repeating: 5)
             heartbeatTimer.setEventHandler {
-                let since = lastOutputQueue.sync { Date().timeIntervalSince(lastOutput) }
+                let since = lastOutputQueue.sync { self.activeUptimeSeconds() - lastOutput }
                 if since >= 5 {
                     self.log("Copy running, no output for \(Int(since))s")
                 }
@@ -6327,7 +6350,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                     self.updateProgressMetrics(speed: metrics.speed, eta: metrics.eta)
                     self.updateCurrentFileProgress(percent: metrics.percent)
                     self.updateProgressFromRsync(toChk: metrics.toCheck)
-                } else if !trimmed.isEmpty {
+                } else if !trimmed.isEmpty, !self.rsyncMessageLine(trimmed) {
                     self.updateCurrentFile(from: trimmed, srcBase: srcBase, dstBase: dstBase, taskName: name)
                 }
             }
@@ -6335,7 +6358,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 streamOutput.readAvailable(
                     from: handle,
-                    onData: { lastOutputQueue.sync { lastOutput = Date() } },
+                    onData: { lastOutputQueue.sync { lastOutput = self.activeUptimeSeconds() } },
                     onRecord: processCopyRecord
                 )
             }
