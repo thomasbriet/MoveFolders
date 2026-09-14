@@ -1115,6 +1115,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         recentDestinationPaths = loadRecentDestinationPaths()
         favoritePresets = loadFavoritePresets()
         lastResumeJob = loadResumeJob()
+        storeResumeJob(lastResumeJob, logChange: false)
         pendingTransferQueue = loadPendingTransferQueue()
         syncProfiles = loadSyncProfiles()
         loadSyncSFMCompatibilityState()
@@ -4908,7 +4909,34 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
 
     func loadResumeJob() -> ResumableTransferJob? {
         guard let data = recentSourceDefaults.data(forKey: resumeJobDefaultsKey) else { return nil }
-        return try? JSONDecoder().decode(ResumableTransferJob.self, from: data)
+        guard let stored = try? JSONDecoder().decode(ResumableTransferJob.self, from: data) else { return nil }
+        return prunedResumeJob(stored, logChanges: true)
+    }
+
+    // Items waarvan de bronmap niet meer bestaat, bijvoorbeeld na een afgeronde verplaatsing,
+    // horen niet meer bij een hervatbare opdracht.
+    func prunedResumeJob(_ job: ResumableTransferJob, logChanges: Bool) -> ResumableTransferJob? {
+        let fileManager = FileManager.default
+        // Een onbereikbare bronmap, bijvoorbeeld een losgekoppelde netwerkschijf, mag niets laten vervallen.
+        guard fileManager.fileExists(atPath: job.srcPath) else { return job }
+        let available = job.items.filter {
+            fileManager.fileExists(atPath: (job.srcPath as NSString).appendingPathComponent($0))
+        }
+        guard available.count != job.items.count else { return job }
+
+        let vanished = job.items.filter { !available.contains($0) }
+        if logChanges {
+            log("Hervatbare opdracht opgeschoond: \(vanished.joined(separator: ", ")) bestaat niet meer in \(job.srcPath)")
+        }
+        guard !available.isEmpty else { return nil }
+        return ResumableTransferJob(
+            srcPath: job.srcPath,
+            dstPath: job.dstPath,
+            items: available,
+            options: job.options,
+            reason: job.reason,
+            createdAt: job.createdAt
+        )
     }
 
     func uniqueResumeItems(_ items: [String]) -> [String] {
@@ -6645,6 +6673,11 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     // Hervat een concrete opdracht: direct wanneer niets loopt, anders achteraan in de wachtrij.
     func resumeTransferJob(_ job: ResumableTransferJob) {
         guard !job.items.isEmpty else { return }
+        guard let job = prunedResumeJob(job, logChanges: true) else {
+            storeResumeJob(nil)
+            alert("Deze overdracht is niet meer te hervatten: de bronmappen staan niet meer op de bronlocatie. De vermelding is verwijderd.")
+            return
+        }
         if transferInProgress {
             enqueueTransfer(items: job.items, srcPath: job.srcPath, dstPath: job.dstPath, options: job.options, resumed: true)
             return

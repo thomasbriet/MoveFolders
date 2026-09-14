@@ -2,6 +2,18 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.28] - 2026-09-14
+
+### Opgelost
+
+- Een hervatbare opdracht blijft niet langer staan voor mappen die al zijn verplaatst. Bij het opstarten en vlak vóór het hervatten vervallen items waarvan de bronmap niet meer bestaat; blijft er niets over, dan verdwijnt de vermelding.
+- Daardoor bleef `Hervat` niet meer scherp staan voor een overdracht die in werkelijkheid gewoon was afgerond, bijvoorbeeld nadat de app tijdens het laatste deel van een opdracht was onderbroken.
+- Een onbereikbare bronmap, bijvoorbeeld een losgekoppelde netwerkschijf, laat niets vervallen. De opdracht blijft dan volledig bewaard tot de schijf er weer is.
+
+### Getest
+
+- Vier controles: een opdracht met bestaande mappen blijft ongewijzigd, een al verplaatste map vervalt, een opdracht zonder overgebleven mappen verdwijnt, en bij een onbereikbaar bronpad blijft alles staan.
+
 ## [0.9.27] - 2026-09-14
 
 ### Toegevoegd
