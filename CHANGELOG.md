@@ -2,6 +2,28 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.26] - 2026-09-14
+
+### Toegevoegd
+
+- Blijft een bronmap staan doordat submappen alleen-lezen zijn, dan biedt de samenvatting na afloop de knop `Bron alsnog opruimen`. Die maakt de betreffende mappen weer schrijfbaar en verwijdert daarna de bron.
+- Opruimen gebeurt uitsluitend na een nieuwe controle: ieder resterend bronbestand moet met dezelfde grootte en wijzigingsdatum op het doel staan. Ontbreekt of verschilt er iets, dan wordt er niets aangepast of verwijderd en meldt de app welke bestanden dat betreft.
+- Vooraf toont de app om hoeveel mappen het gaat en wat er precies gaat gebeuren; `Bron behouden` laat alles ongemoeid.
+- De samenvatting vermeldt voortaan expliciet welke bronmappen niet konden worden opgeruimd en hoeveel alleen-lezen mappen het verwijderen blokkeren.
+- Geslaagd opruimen wordt als `BRON OPGERUIMD` in het overdrachtslog vastgelegd, een afgebroken poging als `BRON BEHOUDEN` met de reden.
+
+### Gewijzigd
+
+- De vraag komt bewust pas bij de samenvatting en niet tijdens de overdracht, zodat een lopende wachtrij niet door een venster wordt onderbroken.
+- Een mislukte opruiming meldt nu hoeveel alleen-lezen mappen het verwijderen blokkeren, in plaats van alleen de naam van de bovenliggende map met `Permission denied`.
+- Opruimtaken verdwijnen vanzelf zodra de bronmap niet meer bestaat, bijvoorbeeld na handmatig opruimen.
+
+### Getest
+
+- Veertien controles op een bronmap met een alleen-lezen submap: het verwijderen mislukt met een begrijpelijke melding, de bron blijft volledig staan en de opruimtaak wordt correct klaargezet met de juiste map.
+- De veiligheidscontrole is los beproefd met een ontbrekend doelbestand en met een doelbestand met afwijkende inhoud; in beide gevallen wordt dat gevonden en blijft de bron staan.
+- Na herstel van het schrijfrecht wordt de bronmap wel verwijderd, terwijl de kopie op het doel onaangeroerd blijft en de opruimtaak uit de lijst verdwijnt.
+
 ## [0.9.25] - 2026-09-14
 
 ### Opgelost

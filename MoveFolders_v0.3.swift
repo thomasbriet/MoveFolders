@@ -715,6 +715,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var queueRunSummaries: [TransferSummary] = []
     var queueRunResumeJobs: [ResumableTransferJob] = []
     var queueRunJobCount = 0
+    var pendingSourceCleanups: [PendingSourceCleanup] = []
+    let pendingCleanupCollectQueue = DispatchQueue(label: "MoveFolders.pendingCleanup.collect")
     // Een lopende overdracht gebruikt de opties van het moment waarop die is gestart of in de wachtrij gezet,
     // zodat het wijzigen van een checkbox voor een volgende opdracht de lopende overdracht niet verandert.
     var activeTransferOptions: TransferOptions?
@@ -837,6 +839,16 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let options: TransferOptions
         let reason: String
         let createdAt: Date
+    }
+
+    // Bronmap die na een geslaagde overdracht niet kon worden opgeruimd doordat submappen
+    // alleen-lezen zijn. Het herstellen daarvan wordt pas bij de samenvatting aangeboden.
+    struct PendingSourceCleanup {
+        let itemName: String
+        let srcBase: String
+        let dstBase: String
+        let readOnlyDirectories: [String]
+        let reason: String
     }
 
     struct QueuedTransferRequest {
@@ -5282,7 +5294,75 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return failures
     }
 
-    func deleteItems(_ items: [String], from basePath: String) -> [String] {
+    // Mappen zonder schrijfrecht voor de eigenaar; hun inhoud kan niet worden verwijderd.
+    func readOnlySourceDirectories(rootPath: String, fileManager: FileManager) -> [String] {
+        func isReadOnlyDirectory(_ path: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
+            guard let attributes = try? fileManager.attributesOfItem(atPath: path),
+                  let permissions = attributes[.posixPermissions] as? NSNumber else { return false }
+            return (permissions.uint16Value & UInt16(S_IWUSR)) == 0
+        }
+
+        var result: [String] = []
+        if isReadOnlyDirectory(rootPath) { result.append(rootPath) }
+        guard let enumerator = fileManager.enumerator(atPath: rootPath) else { return result }
+        for case let relativePath as String in enumerator {
+            let path = (rootPath as NSString).appendingPathComponent(relativePath)
+            if isReadOnlyDirectory(path) { result.append(path) }
+        }
+        return result
+    }
+
+    func makeDirectoriesWritable(_ paths: [String], fileManager: FileManager) -> [String] {
+        var failures: [String] = []
+        // Van buiten naar binnen, zodat een bovenliggende map eerst weer schrijfbaar is.
+        let shallowestFirst = paths.sorted {
+            ($0 as NSString).pathComponents.count < ($1 as NSString).pathComponents.count
+        }
+        for path in shallowestFirst {
+            do {
+                let attributes = try fileManager.attributesOfItem(atPath: path)
+                let current = (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+                let updated = current | UInt16(S_IWUSR)
+                try fileManager.setAttributes([.posixPermissions: NSNumber(value: updated)], ofItemAtPath: path)
+                log("Schrijfrecht hersteld: \(path)")
+            } catch {
+                let ns = error as NSError
+                failures.append("\(path): \(error.localizedDescription) [\(ns.domain):\(ns.code)]")
+            }
+        }
+        return failures
+    }
+
+    // Vergeet bronnen die intussen zelf zijn opgeruimd of verplaatst.
+    func currentPendingSourceCleanups() -> [PendingSourceCleanup] {
+        pendingCleanupCollectQueue.sync {
+            pendingSourceCleanups.removeAll { cleanup in
+                let path = (cleanup.srcBase as NSString).appendingPathComponent(cleanup.itemName)
+                return !FileManager.default.fileExists(atPath: path)
+            }
+            return pendingSourceCleanups
+        }
+    }
+
+    func registerPendingSourceCleanup(_ cleanup: PendingSourceCleanup) {
+        pendingCleanupCollectQueue.sync {
+            pendingSourceCleanups.removeAll { $0.itemName == cleanup.itemName && $0.srcBase == cleanup.srcBase }
+            pendingSourceCleanups.append(cleanup)
+        }
+    }
+
+    func deleteItems(_ items: [String], from basePath: String, dstBase: String) -> [String] {
+        func isPermissionDeleteError(_ error: Error) -> Bool {
+            let ns = error as NSError
+            if ns.domain == NSPOSIXErrorDomain && (ns.code == Int(EACCES) || ns.code == Int(EPERM)) { return true }
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                if underlying.domain == NSPOSIXErrorDomain && (underlying.code == Int(EACCES) || underlying.code == Int(EPERM)) { return true }
+            }
+            return false
+        }
+
         func isResourceBusyDeleteError(_ error: Error) -> Bool {
             let ns = error as NSError
             if ns.domain == NSPOSIXErrorDomain && ns.code == Int(EBUSY) { return true }
@@ -5396,7 +5476,36 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 if let error = lastError {
                     let detail = describeDeleteError(error)
                     log("Delete failed \(path): \(detail)")
-                    errors.append("\(nm): \(detail)")
+                    // Alleen-lezen submappen zijn op te lossen; dat wordt bij de samenvatting aangeboden,
+                    // zodat een lopende wachtrij niet door een venster wordt onderbroken.
+                    let readOnlyDirectories = isPermissionDeleteError(error)
+                        ? readOnlySourceDirectories(rootPath: path, fileManager: fm)
+                        : []
+                    if !readOnlyDirectories.isEmpty {
+                        let names = readOnlyDirectories
+                            .map { ($0 as NSString).lastPathComponent }
+                            .prefix(3)
+                            .joined(separator: ", ")
+                        log("Alleen-lezen mappen gevonden in \(path): \(readOnlyDirectories.count) (\(names))")
+                        recordTransferLog(
+                            status: "BRON NIET OPGERUIMD",
+                            relativePath: nm,
+                            srcBase: basePath,
+                            detail: "\(readOnlyDirectories.count) alleen-lezen map(pen): \(names)"
+                        )
+                        registerPendingSourceCleanup(
+                            PendingSourceCleanup(
+                                itemName: nm,
+                                srcBase: basePath,
+                                dstBase: dstBase,
+                                readOnlyDirectories: readOnlyDirectories,
+                                reason: detail
+                            )
+                        )
+                        errors.append("\(nm): \(readOnlyDirectories.count) alleen-lezen map(pen) blokkeren het verwijderen; op te lossen via de samenvatting.\n\(detail)")
+                    } else {
+                        errors.append("\(nm): \(detail)")
+                    }
                 }
             }
         }
@@ -6032,7 +6141,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 return TransferSummary(name: items.joined(separator: ", "), status: .success)
             }
             setPhase("Opschonen")
-            let errors = deleteItems(items, from: srcBase)
+            let errors = deleteItems(items, from: srcBase, dstBase: dstBase)
             if errors.isEmpty {
                 return TransferSummary(name: items.joined(separator: ", "), status: .success)
             }
@@ -6083,7 +6192,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             return TransferSummary(name: items.joined(separator: ", "), status: outcomeStatus)
         }
         setPhase("Opschonen")
-        let errors = deleteItems(items, from: srcBase)
+        let errors = deleteItems(items, from: srcBase, dstBase: dstBase)
         if errors.isEmpty {
             return TransferSummary(name: items.joined(separator: ", "), status: outcomeStatus)
         }
@@ -7132,11 +7241,22 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
             lines.append("Hervatbaar: \(summarizeList(resumableItems))")
         }
 
+        let cleanups = currentPendingSourceCleanups()
+        if !cleanups.isEmpty {
+            let folderCount = cleanups.reduce(0) { $0 + $1.readOnlyDirectories.count }
+            lines.append("")
+            lines.append("Bron niet opgeruimd: \(summarizeList(cleanups.map(\.itemName))) — \(folderCount) alleen-lezen map(pen) blokkeren het verwijderen.")
+        }
+
         let alert = NSAlert()
         alert.messageText = jobCount > 1 ? "Samenvatting van \(jobCount) overdrachten" : "Samenvatting overdrachten"
         alert.informativeText = lines.dropFirst().joined(separator: "\n")
 
         var actions: [String] = []
+        if !cleanups.isEmpty {
+            alert.addButton(withTitle: "Bron alsnog opruimen")
+            actions.append("cleanupSource")
+        }
         if !resumable.isEmpty {
             alert.addButton(withTitle: resumable.count > 1 ? "Hervat alles" : "Hervat")
             actions.append("resume")
@@ -7155,6 +7275,8 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         let selectedIndex = response.rawValue - first
         guard selectedIndex >= 0 && selectedIndex < actions.count else { return }
         switch actions[selectedIndex] {
+        case "cleanupSource":
+            startPendingSourceCleanup(cleanups)
         case "resume":
             // De eerste start direct, de rest komt automatisch achter elkaar in de wachtrij.
             for job in resumable { resumeTransferJob(job) }
@@ -7167,6 +7289,120 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         default:
             break
         }
+    }
+
+    // Ruimt bronmappen op die alleen door alleen-lezen submappen bleven staan. Er wordt pas iets
+    // aangepast of verwijderd nadat opnieuw is vastgesteld dat alles op het doel staat.
+    func startPendingSourceCleanup(_ cleanups: [PendingSourceCleanup]) {
+        guard !cleanups.isEmpty else { return }
+        guard !transferInProgress else {
+            alert("Er loopt een overdracht. Wacht tot die klaar is en ruim de bron daarna op via het overdrachtslog of opnieuw verplaatsen.")
+            return
+        }
+
+        let folderCount = cleanups.reduce(0) { $0 + $1.readOnlyDirectories.count }
+        let shownFolders = cleanups
+            .flatMap(\.readOnlyDirectories)
+            .prefix(8)
+            .map { "• \(($0 as NSString).lastPathComponent)" }
+            .joined(separator: "\n")
+        let remaining = folderCount > 8 ? "\n• … (+\(folderCount - 8) meer)" : ""
+
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "Bron opruimen na controle?"
+        confirm.informativeText = """
+        MoveFolders controleert eerst opnieuw of ieder bronbestand van \(summarizeList(cleanups.map(\.itemName))) op het doel staat met dezelfde grootte en datum.
+
+        Alleen als dat volledig klopt worden \(folderCount) alleen-lezen map(pen) weer schrijfbaar gemaakt en wordt de bronmap verwijderd. Klopt er iets niet, dan blijft alles staan.
+
+        \(shownFolders)\(remaining)
+        """
+        confirm.addButton(withTitle: "Controleer en ruim op")
+        let cancelButton = confirm.addButton(withTitle: "Bron behouden")
+        cancelButton.keyEquivalent = "\u{1b}"
+        guard confirm.runModal() == .alertFirstButtonReturn else {
+            log("Opruimen bron geannuleerd door gebruiker")
+            return
+        }
+
+        transferInProgress = true
+        updateResumeButton()
+        updateQueueUI()
+        showProgress("Bron opruimen...", detail: summarizeList(cleanups.map(\.itemName)))
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var summaries: [TransferSummary] = []
+            var resolvedIds: [(String, String)] = []
+
+            for cleanup in cleanups {
+                let item = cleanup.itemName
+                DispatchQueue.main.async { self.setPhase("Controle doel: \(item)") }
+                let missing = self.missingOrChangedPaths(for: cleanup)
+                if !missing.isEmpty {
+                    let detail = "niet opgeruimd; \(missing.count) bestand(en) ontbreken of wijken af op het doel"
+                    self.log("Opruimen bron afgebroken voor \(item): \(detail) | \(missing.prefix(5).joined(separator: ", "))")
+                    self.recordTransferLog(
+                        status: "BRON BEHOUDEN",
+                        relativePath: item,
+                        srcBase: cleanup.srcBase,
+                        dstBase: cleanup.dstBase,
+                        detail: "\(detail): \(missing.prefix(5).joined(separator: ", "))"
+                    )
+                    summaries.append(TransferSummary(name: item, status: .failed(detail)))
+                    continue
+                }
+
+                DispatchQueue.main.async { self.setPhase("Schrijfrecht herstellen: \(item)") }
+                let failures = self.makeDirectoriesWritable(cleanup.readOnlyDirectories, fileManager: FileManager.default)
+                if !failures.isEmpty {
+                    let detail = "\(failures.count) van \(cleanup.readOnlyDirectories.count) map(pen) konden niet schrijfbaar worden gemaakt; bron behouden"
+                    self.log("Schrijfrecht herstellen mislukt voor \(item): \(failures.prefix(3).joined(separator: "; "))")
+                    self.recordTransferLog(status: "BRON BEHOUDEN", relativePath: item, srcBase: cleanup.srcBase, detail: detail)
+                    summaries.append(TransferSummary(name: item, status: .failed(detail)))
+                    continue
+                }
+
+                DispatchQueue.main.async { self.setPhase("Opschonen: \(item)") }
+                let errors = self.deleteItems([item], from: cleanup.srcBase, dstBase: cleanup.dstBase)
+                if errors.isEmpty {
+                    self.log("Bron opgeruimd na herstel schrijfrecht: \(item)")
+                    self.recordTransferLog(
+                        status: "BRON OPGERUIMD",
+                        relativePath: item,
+                        srcBase: cleanup.srcBase,
+                        detail: "\(cleanup.readOnlyDirectories.count) map(pen) schrijfbaar gemaakt na hercontrole"
+                    )
+                    summaries.append(TransferSummary(name: item, status: .success))
+                    resolvedIds.append((cleanup.itemName, cleanup.srcBase))
+                } else {
+                    summaries.append(TransferSummary(name: item, status: .failed(errors.joined(separator: "\n"))))
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.pendingCleanupCollectQueue.sync {
+                    self.pendingSourceCleanups.removeAll { cleanup in
+                        resolvedIds.contains { $0.0 == cleanup.itemName && $0.1 == cleanup.srcBase }
+                    }
+                }
+                self.hideProgress()
+                self.transferInProgress = false
+                self.updateResumeButton()
+                self.refreshSrc()
+                self.refreshDst()
+                self.startNextQueuedTransferIfIdle()
+                self.showSummary(summaries, dstPath: cleanups.first?.dstBase)
+            }
+        }
+    }
+
+    // Bronbestanden die niet, of niet identiek, op het doel staan.
+    func missingOrChangedPaths(for cleanup: PendingSourceCleanup) -> [String] {
+        let srcMap = buildFileMap(items: [cleanup.itemName], base: cleanup.srcBase)
+        guard !srcMap.isEmpty else { return [] }
+        let dstMap = buildFileMap(items: [cleanup.itemName], base: cleanup.dstBase)
+        return diffFileMaps(src: srcMap, dst: dstMap).map(\.relPath)
     }
 
     func setupTransferLogWindow() {
