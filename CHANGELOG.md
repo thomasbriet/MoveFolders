@@ -2,6 +2,20 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.24] - 2026-09-14
+
+### Gewijzigd
+
+- Tussen wachtrij-opdrachten verschijnt geen samenvattingsvenster meer. De volgende opdracht begint direct en pas na de laatste opdracht volgt één gezamenlijke samenvatting.
+- Die samenvatting heet `Samenvatting van x overdrachten` en bundelt de geslaagde, gewaarschuwde en mislukte mappen van alle opdrachten uit die reeks.
+- Staan er na afloop meerdere hervatbare opdrachten open, dan zet `Hervat alles` ze in één keer achter elkaar in de wachtrij.
+- Een enkele overdracht zonder wachtrij toont de samenvatting ongewijzigd meteen na afloop.
+- Het overdrachtslog vermeldt met `Wachtrij gaat verder` dat de samenvatting is uitgesteld tot de laatste opdracht.
+
+### Getest
+
+- Twee opeenvolgende wachtrij-opdrachten met elk 400 bestanden: de tweede opdracht start direct na de eerste, er verschijnt geen venster tussendoor, beide mappen zijn volledig overgezet en de samenvatting wordt precies één keer uitgesteld.
+
 ## [0.9.23] - 2026-09-14
 
 ### Toegevoegd

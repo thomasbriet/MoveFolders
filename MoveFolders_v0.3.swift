@@ -711,6 +711,10 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
     var lastResumeJob: ResumableTransferJob?
     var pendingTransferQueue: [QueuedTransferRequest] = []
     var transferInProgress = false
+    // Resultaten van opeenvolgende wachtrij-opdrachten; de samenvatting volgt pas na de laatste.
+    var queueRunSummaries: [TransferSummary] = []
+    var queueRunResumeJobs: [ResumableTransferJob] = []
+    var queueRunJobCount = 0
     // Een lopende overdracht gebruikt de opties van het moment waarop die is gestart of in de wachtrij gezet,
     // zodat het wijzigen van een checkbox voor een volgende opdracht de lopende overdracht niet verandert.
     var activeTransferOptions: TransferOptions?
@@ -7035,11 +7039,26 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
                 self.transferInProgress = false
                 self.activeTransferOptions = nil
                 self.updateResumeButton()
-                // De volgende wachtrij-opdracht start vóór de samenvatting, zodat een openstaande
-                // samenvatting de wachtrij niet ophoudt.
-                let hasQueuedWork = !self.pendingTransferQueue.isEmpty
-                self.startNextQueuedTransferIfIdle()
-                self.showSummary(summaries, dstPath: dstPath, resumeJob: finishedResumeJob, asSheet: hasQueuedWork)
+
+                self.queueRunSummaries.append(contentsOf: summaries)
+                if let finishedResumeJob { self.queueRunResumeJobs.append(finishedResumeJob) }
+                self.queueRunJobCount += 1
+
+                // Bij een gevulde wachtrij gaat de volgende opdracht direct verder; de samenvatting
+                // van alle opdrachten volgt pas wanneer de wachtrij leeg is.
+                if !self.pendingTransferQueue.isEmpty {
+                    self.log("Wachtrij gaat verder; samenvatting volgt na de laatste opdracht")
+                    self.startNextQueuedTransferIfIdle()
+                    return
+                }
+
+                let combinedSummaries = self.queueRunSummaries
+                let combinedResumeJobs = self.queueRunResumeJobs
+                let jobCount = self.queueRunJobCount
+                self.queueRunSummaries = []
+                self.queueRunResumeJobs = []
+                self.queueRunJobCount = 0
+                self.showSummary(combinedSummaries, dstPath: dstPath, resumeJobs: combinedResumeJobs, jobCount: jobCount)
             }
         }
     }
@@ -7060,7 +7079,7 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         return shown
     }
 
-    func showSummary(_ summaries: [TransferSummary], dstPath: String? = nil, resumeJob: ResumableTransferJob? = nil, asSheet: Bool = false) {
+    func showSummary(_ summaries: [TransferSummary], dstPath: String? = nil, resumeJobs: [ResumableTransferJob] = [], jobCount: Int = 1) {
         guard !summaries.isEmpty else { return }
         var ok: [String] = []
         var warn: [String] = []
@@ -7083,23 +7102,20 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         lines.append("Waarschuwingen: \(summarizeList(warn))")
         lines.append("Fouten: \(summarizeList(fail))")
 
-        let resumable = resumeJob.flatMap { $0.items.isEmpty ? nil : $0 }
-        if let job = resumable {
+        let resumable = resumeJobs.filter { !$0.items.isEmpty }
+        if !resumable.isEmpty {
             lines.append("")
-            lines.append("Hervatbaar: \(summarizeList(job.items))")
-        }
-        if !pendingTransferQueue.isEmpty {
-            lines.append("")
-            lines.append("Nog in de wachtrij: \(pendingTransferQueue.count) opdracht(en)")
+            let resumableItems = resumable.flatMap { $0.items }
+            lines.append("Hervatbaar: \(summarizeList(resumableItems))")
         }
 
         let alert = NSAlert()
-        alert.messageText = "Samenvatting overdrachten"
+        alert.messageText = jobCount > 1 ? "Samenvatting van \(jobCount) overdrachten" : "Samenvatting overdrachten"
         alert.informativeText = lines.dropFirst().joined(separator: "\n")
 
         var actions: [String] = []
-        if resumable != nil {
-            alert.addButton(withTitle: "Hervat")
+        if !resumable.isEmpty {
+            alert.addButton(withTitle: resumable.count > 1 ? "Hervat alles" : "Hervat")
             actions.append("resume")
         }
         if dstPath != nil {
@@ -7111,29 +7127,23 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         alert.addButton(withTitle: "Sluit")
         actions.append("close")
 
-        func handle(_ response: NSApplication.ModalResponse) {
-            let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-            let selectedIndex = response.rawValue - first
-            guard selectedIndex >= 0 && selectedIndex < actions.count else { return }
-            switch actions[selectedIndex] {
-            case "resume":
-                if let job = resumable { resumeTransferJob(job) }
-            case "openDestination":
-                if let dstPath = dstPath {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: dstPath))
-                }
-            case "showLog":
-                showTransferLogWindow()
-            default:
-                break
+        let response = alert.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        let selectedIndex = response.rawValue - first
+        guard selectedIndex >= 0 && selectedIndex < actions.count else { return }
+        switch actions[selectedIndex] {
+        case "resume":
+            // De eerste start direct, de rest komt automatisch achter elkaar in de wachtrij.
+            for job in resumable { resumeTransferJob(job) }
+        case "openDestination":
+            if let dstPath = dstPath {
+                NSWorkspace.shared.open(URL(fileURLWithPath: dstPath))
             }
+        case "showLog":
+            showTransferLogWindow()
+        default:
+            break
         }
-
-        if asSheet, let parent = window, parent.isVisible {
-            alert.beginSheetModal(for: parent) { response in handle(response) }
-            return
-        }
-        handle(alert.runModal())
     }
 
     func setupTransferLogWindow() {
