@@ -13,18 +13,18 @@ Zie [CHANGELOG.md](CHANGELOG.md) voor alle releasewijzigingen.
 ## Build
 
 ```bash
-./scripts/build_release.sh 0.9.22
+./scripts/build_release.sh 0.9.23
 ```
 
 Dit maakt lokaal:
 
 - `MoveFolders.app`
-- `MoveFolders_v0.9.22_share.zip`
-- `MoveFolders_v0.9.22_installer.pkg`
+- `MoveFolders_v0.9.23_share.zip`
+- `MoveFolders_v0.9.23_installer.pkg`
 
 ## Updates
 
-De app controleert bij iedere start automatisch op een nieuwere GitHub Release en toont alleen een melding wanneer een update beschikbaar is. De knop `Updates` kan dezelfde controle handmatig uitvoeren en de `.pkg` installer openen. Installeren wordt geblokkeerd zolang een overdracht of sync actief is, zodat een actieve rsync-run en het bijbehorende datumherstel niet halverwege worden afgebroken.
+De app controleert bij iedere start automatisch op een nieuwere GitHub Release en toont alleen een melding wanneer een update beschikbaar is. De knop `Updates` kan dezelfde controle handmatig uitvoeren en de `.pkg` installer openen. Het updatevenster toont daarbij de wijzigingen uit `CHANGELOG.md` van de nieuwe release; zijn er versies overgeslagen, dan verschijnen alle tussenliggende versies onder elkaar. Installeren wordt geblokkeerd zolang een overdracht of sync actief is, zodat een actieve rsync-run en het bijbehorende datumherstel niet halverwege worden afgebroken.
 
 Voor gebruik moet in `MoveFolders_v0.3.swift` deze constante worden ingesteld:
 

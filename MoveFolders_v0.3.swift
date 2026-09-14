@@ -7453,10 +7453,30 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         }
 
         log("Update beschikbaar: huidig \(currentVersion), nieuw \(latestVersion)")
+        // Haal eerst de wijzigingen op, zodat ook overgeslagen tussenversies zichtbaar zijn.
+        fetchReleaseNotes(sinceVersion: currentVersion, upToVersion: latestVersion, releaseTag: latestVersion) { notes in
+            self.presentUpdateAlert(
+                currentVersion: currentVersion,
+                latestVersion: latestVersion,
+                releaseURLString: releaseURLString,
+                packageURLString: packageURLString,
+                notes: notes
+            )
+        }
+    }
+
+    func presentUpdateAlert(currentVersion: String, latestVersion: String, releaseURLString: String, packageURLString: String?, notes: String?) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Update beschikbaar"
-        alert.informativeText = "Huidig: \(currentVersion)\nNieuw: \(latestVersion)\n\nMoveFolders downloadt de installer en sluit daarna, zodat de update de bestaande app kan vervangen."
+        var info = "Huidig: \(currentVersion)\nNieuw: \(latestVersion)\n\nMoveFolders downloadt de installer en sluit daarna, zodat de update de bestaande app kan vervangen."
+        if notes == nil {
+            info += "\n\nDe lijst met wijzigingen kon niet worden opgehaald; die staat wel op de release-pagina."
+        }
+        alert.informativeText = info
+        if let notes = notes, !notes.isEmpty {
+            alert.accessoryView = makeReleaseNotesView(notes)
+        }
         let hasPackage = packageURLString != nil
         if hasPackage {
             alert.addButton(withTitle: "Download en open installer")
@@ -7470,6 +7490,104 @@ class Controller: NSObject, NSWindowDelegate, NSApplicationDelegate, NSMenuDeleg
         } else if response == (hasPackage ? .alertSecondButtonReturn : .alertFirstButtonReturn), let releaseURL = URL(string: releaseURLString) {
             NSWorkspace.shared.open(releaseURL)
         }
+    }
+
+    func makeReleaseNotesView(_ notes: String) -> NSView {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 260))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let textView = NSTextView(frame: scroll.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.drawsBackground = true
+        textView.backgroundColor = NSColor.textBackgroundColor
+        textView.textColor = NSColor.textColor
+        textView.font = NSFont.systemFont(ofSize: 12)
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.string = notes
+        textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        scroll.documentView = textView
+        return scroll
+    }
+
+    // Leest CHANGELOG.md van de release en levert alle secties tussen de huidige en de nieuwe versie.
+    func fetchReleaseNotes(sinceVersion: String, upToVersion: String, releaseTag: String, completion: @escaping (String?) -> Void) {
+        let tag = releaseTag.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates: [String] = []
+        if !tag.isEmpty {
+            candidates.append("https://raw.githubusercontent.com/\(updateGitHubOwner)/\(updateGitHubRepo)/\(tag)/CHANGELOG.md")
+        }
+        candidates.append("https://raw.githubusercontent.com/\(updateGitHubOwner)/\(updateGitHubRepo)/main/CHANGELOG.md")
+
+        func attempt(_ index: Int) {
+            guard index < candidates.count, let url = URL(string: candidates[index]) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+            request.setValue("MoveFolders/\(sinceVersion)", forHTTPHeaderField: "User-Agent")
+            URLSession.shared.dataTask(with: request) { data, response, _ in
+                let httpOK = (response as? HTTPURLResponse).map { (200...299).contains($0.statusCode) } ?? false
+                guard httpOK, let data = data, let text = String(data: data, encoding: .utf8) else {
+                    attempt(index + 1)
+                    return
+                }
+                let notes = self.releaseNotes(fromChangelog: text, sinceVersion: sinceVersion, upToVersion: upToVersion)
+                DispatchQueue.main.async { completion(notes) }
+            }.resume()
+        }
+        attempt(0)
+    }
+
+    func releaseNotes(fromChangelog text: String, sinceVersion: String, upToVersion: String) -> String? {
+        var sections: [(version: String, lines: [String])] = []
+        var currentVersion: String?
+        var currentLines: [String] = []
+
+        func closeSection() {
+            if let version = currentVersion {
+                sections.append((version, currentLines))
+            }
+            currentVersion = nil
+            currentLines = []
+        }
+
+        for rawLine in text.components(separatedBy: .newlines) {
+            if rawLine.hasPrefix("## ["),
+               let open = rawLine.firstIndex(of: "["),
+               let close = rawLine.firstIndex(of: "]"),
+               open < close {
+                closeSection()
+                currentVersion = String(rawLine[rawLine.index(after: open)..<close])
+                currentLines = [rawLine.replacingOccurrences(of: "## ", with: "")]
+                continue
+            }
+            if currentVersion != nil { currentLines.append(rawLine) }
+        }
+        closeSection()
+
+        let relevant = sections.filter { section in
+            guard compareVersions(section.version, sinceVersion) == .orderedDescending else { return false }
+            return compareVersions(section.version, upToVersion) != .orderedDescending
+        }
+        guard !relevant.isEmpty else { return nil }
+
+        var out = "Wijzigingen sinds versie \(sinceVersion):\n"
+        for section in relevant.prefix(30) {
+            let body = section.lines
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            out += "\n\(body)\n"
+        }
+        if relevant.count > 30 {
+            out += "\n(+\(relevant.count - 30) oudere versies, zie CHANGELOG.md op GitHub)\n"
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func downloadAndOpenUpdate(packageURL: URL, latestVersion: String) {

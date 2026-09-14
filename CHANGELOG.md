@@ -2,6 +2,24 @@
 
 Alle relevante wijzigingen aan MoveFolders worden hier bijgehouden.
 
+## [0.9.23] - 2026-09-14
+
+### Toegevoegd
+
+- Het updatevenster toont nu wat er in de nieuwe versie is veranderd. De wijzigingen worden rechtstreeks uit `CHANGELOG.md` van de betreffende release gehaald.
+- Wie meerdere versies heeft overgeslagen, ziet alle tussenliggende versies onder elkaar, nieuwste bovenaan. Bij zeer grote verschillen worden de dertig nieuwste versies getoond met een verwijzing naar het volledige changelog op GitHub.
+- De wijzigingen staan in een apart scrollbaar venstergedeelte, zodat lange teksten de knoppen niet wegdrukken.
+- Nieuwe GitHub Releases krijgen voortaan automatisch de changelog-tekst van die versie als release-omschrijving, in plaats van alleen een standaardregel.
+
+### Gewijzigd
+
+- Kan de lijst met wijzigingen niet worden opgehaald, dan verschijnt het updatevenster gewoon zoals voorheen, met de melding dat de wijzigingen op de release-pagina staan. Een mislukte ophaalpoging blokkeert het updaten nooit.
+
+### Getest
+
+- De changelog-verwerking is getest tegen de echte `CHANGELOG.md`: één versie verschil toont alleen die versie, overgeslagen versies verschijnen allemaal en in de juiste volgorde, de eigen versie en nog niet uitgebrachte versies blijven weg, en een verschil van tientallen versies wordt netjes afgekapt.
+- Het ophalen bij GitHub is echt uitgevoerd tegen de tag `v0.9.22` en leverde de juiste, gefilterde wijzigingen op.
+
 ## [0.9.22] - 2026-09-14
 
 ### Toegevoegd

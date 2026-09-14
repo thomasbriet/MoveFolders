@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, for example 0.9.22"
+        description: "Release version, for example 0.9.23"
         required: true
         type: string
 
@@ -49,11 +49,23 @@ jobs:
         run: |
           PKG="MoveFolders_v${VERSION}_installer.pkg"
           ZIP="MoveFolders_v${VERSION}_share.zip"
+          NOTES="release-notes.md"
+
+          awk -v ver="$VERSION" '
+            $0 == "## [" ver "]" || index($0, "## [" ver "] ") == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > "$NOTES"
+
+          if [ ! -s "$NOTES" ]; then
+            echo "Automatische build voor MoveFolders v${VERSION}." > "$NOTES"
+          fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$PKG" "$ZIP" --clobber
+            gh release edit "$TAG" --notes-file "$NOTES"
           else
             gh release create "$TAG" "$PKG" "$ZIP" \
               --title "MoveFolders v${VERSION}" \
-              --notes "Automatische build voor MoveFolders v${VERSION}."
+              --notes-file "$NOTES"
           fi
